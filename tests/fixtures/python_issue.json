@@ -1,0 +1,7 @@
+{
+  "title": "Parser crashes on unicode input",
+  "body": "The parser raises on any unicode string.\n\nSteps:\n\n```bash\npip install -e .\npython -m pytest tests/test_parser.py -x\n```\n\n```\nTraceback (most recent call last):\n  File \"tests/test_parser.py\", line 9, in test_unicode\n    parse(\"caf\\u00e9\")\n  File \"/home/alice/project/src/mypkg/parser.py\", line 42, in parse\n    return _decode(raw)\nUnicodeDecodeError: 'ascii' codec can't decode byte 0xc3\n```\n\nSee also src/mypkg/decoder.py for the helper.",
+  "comments": [
+    { "body": "Reproduced on main with `parse()` and Python 3.12." }
+  ]
+}

@@ -1,0 +1,47 @@
+[project]
+name = "issue2repro"
+version = "0.1.0"
+description = "Turn a GitHub bug report into a reproducible local environment."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Andre Ruiz Loera", email = "andre.x.ruizloera@gmail.com" }]
+keywords = ["github", "debugging", "reproducibility", "developer-tools", "bug-reports"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+issue2repro = "issue2repro.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/andreruizloera/issue2repro"
+Issues = "https://github.com/andreruizloera/issue2repro/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/issue2repro"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RET"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

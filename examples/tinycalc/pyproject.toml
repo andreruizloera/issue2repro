@@ -1,0 +1,9 @@
+[project]
+name = "tinycalc"
+version = "0.1.0"
+description = "A deliberately buggy toy calculator used as an issue2repro demo fixture."
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

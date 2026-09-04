@@ -1,0 +1,5 @@
+{
+  "title": "TypeError when config file is missing",
+  "body": "Running the CLI without a config file crashes.\n\n```console\n$ npm install\n$ npm test\n```\n\n```\nTypeError: Cannot read properties of undefined (reading 'load')\n    at loadConfig (/Users/bob/app/src/config.js:17:22)\n    at Object.<anonymous> (/Users/bob/app/src/index.js:5:1)\n    at Module._compile (node:internal/modules/cjs/loader:1105:14)\n```",
+  "comments": []
+}

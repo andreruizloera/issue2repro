@@ -1,0 +1,9 @@
+{
+  "title": "evaluate() crashes on expressions with negative numbers",
+  "body": "Calling `evaluate` on any expression that contains a negative operand raises a `ValueError` instead of returning the result.\n\nSteps to reproduce:\n\n```bash\npip install pytest\npython -m pytest tests/test_evaluate.py -x\n```\n\nOutput:\n\n```\nTraceback (most recent call last):\n  File \"tests/test_evaluate.py\", line 13, in test_negative_operand\n    assert evaluate(\"2 + -3\") == -1\n  File \"src/tinycalc/evaluate.py\", line 23, in evaluate\n    value = int(tokens[i + 1])\nValueError: invalid literal for int() with base 10: '-'\n```\n\nExpected: `evaluate(\"2 + -3\")` returns `-1`.",
+  "comments": [
+    {
+      "body": "Confirmed on 0.1.0. The tokenizer in src/tinycalc/evaluate.py splits `-3` into `-` and `3`, so the evaluator reads the minus sign where it expects a number."
+    }
+  ]
+}
