@@ -11,7 +11,9 @@ repository, detects the ecosystem and test commands from the manifests,
 extracts reproduction signals from the issue text (stack traces, fenced
 commands, filenames), and generates a workspace with a runnable
 `reproduce.sh`, a best-effort `Dockerfile`, and an honest confidence
-score explaining exactly what was inferred and why.
+score explaining exactly what was inferred and why. Then `verify` runs
+the reproduction in a container and tells you whether the failure it
+observed is the failure the issue reports.
 
 ## Quickstart
 
@@ -22,16 +24,17 @@ uv venv --python 3.13
 uv pip install -e .
 source .venv/bin/activate
 
-./demo.sh                                        # offline end-to-end demo
+./demo.sh                                        # end-to-end demo
 issue2repro inspect https://github.com/OWNER/REPO/issues/N   # a real issue
+issue2repro verify https://github.com/OWNER/REPO/issues/N    # did it reproduce?
 ```
 
 ## Example
 
-Real output from `./demo.sh`, which runs the whole pipeline offline
-against the fixture project in `examples/tinycalc` and the committed bug
-report in `examples/tinycalc-issue-1.json` (cloned over `file://`, issue
-read from disk, no network):
+Real output from `./demo.sh`, which runs the whole pipeline against the
+fixture project in `examples/tinycalc` and the committed bug reports in
+`examples/tinycalc-issue-*.json` (cloned over `file://`, issues read from
+disk):
 
 ```
 == issue2repro build ==
@@ -46,7 +49,7 @@ Signals:
   stack trace: python, 2 frame(s) (ValueError: invalid literal for int() with base 10: '-')
   filenames mentioned: tests/test_evaluate.py, src/tinycalc/evaluate.py
 
-Reproduction confidence: 100%
+Reproduction confidence: 100% inferred
   [35/35] explicit repro commands: 2 command(s) found in fenced shell blocks
   [25/25] stack trace: python stack trace maps to existing file(s): tests/test_evaluate.py, src/tinycalc/evaluate.py
   [20/20] test command: detected from manifests: python -m pytest
@@ -58,6 +61,7 @@ Workspace written to /tmp/.../repro/
   metadata.json
   reproduce.sh
   Dockerfile
+  .dockerignore
 ```
 
 The generated `reproduce.sh`:
@@ -72,6 +76,14 @@ The generated `reproduce.sh`:
 set -euo pipefail
 WORKSPACE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Step markers for `issue2repro verify`, so it can tell a setup failure
+# apart from the failure the issue describes. Silent by default.
+i2r_step() {
+    if [ "${ISSUE2REPRO_TRACE:-}" = "1" ]; then
+        printf '##issue2repro:step:%s:%s\n' "$1" "$2"
+    fi
+}
+
 # Isolated environment so installs do not touch your system Python.
 if [ ! -d "$WORKSPACE/.venv" ]; then python3 -m venv "$WORKSPACE/.venv"; fi
 . "$WORKSPACE/.venv/bin/activate"
@@ -79,11 +91,13 @@ if [ ! -d "$WORKSPACE/.venv" ]; then python3 -m venv "$WORKSPACE/.venv"; fi
 cd "$WORKSPACE/source"
 
 # Explicit reproduction steps taken from the issue text.
+i2r_step 1 setup
 pip install pytest
+i2r_step 2 repro
 python -m pytest tests/test_evaluate.py -x
 ```
 
-And `issue2repro run` executes it (pytest output trimmed):
+`issue2repro run` executes it and reports the exit code:
 
 ```
 FAILED tests/test_evaluate.py::test_negative_operand - ValueError: invalid li...
@@ -92,7 +106,122 @@ FAILED tests/test_evaluate.py::test_negative_operand - ValueError: invalid li...
 reproduce.sh exited 1: a nonzero exit usually means the reported failure reproduced.
 ```
 
-The reported bug reproduces on the first try, from nothing but the issue.
+## Verify: was that actually the reported bug?
+
+"Usually" is doing a lot of work in that last line. A nonzero exit can be
+the reported bug, a failed `pip install`, a missing system library, or a
+completely unrelated test that was already red. `issue2repro verify` runs
+the reproduction and answers the question the exit code cannot.
+
+The demo's three verify parts, all real output:
+
+```
+== issue2repro verify: the reported failure, checked against the run ==
+Verification: REPRODUCED (observed by running reproduce.sh on this machine)
+  the run failed the way the issue describes
+  expected (from the issue): ValueError: invalid literal for int() with base 10: '-'; test_negative_operand
+  observed (from the run):   ValueError: invalid literal for int() with base 10: '-'; tests/test_evaluate.py::test_negative_operand
+  exception: match
+  message:   exact
+  tests:     match (test_negative_operand)
+```
+
+The same bug, reported by someone whose setup step only works on their
+branch. `run` calls this a reproduction; it is not one:
+
+```
+== issue2repro verify: the same bug, but the reporter's setup step fails ==
+Verification: ENVIRONMENT-FAILURE (observed by running reproduce.sh on this machine)
+  the script exited during setup, at step 1 (pip install -r requirements-dev.txt). The reproduction never ran, so this says nothing about the bug.
+  expected (from the issue): ValueError: invalid literal for int() with base 10: '-'; test_negative_operand
+  observed (from the run):   nothing checkable
+```
+
+And an issue reporting a second, different bug in the same file. The
+suite does fail, so the exit code says "reproduced". It did not:
+
+```
+== issue2repro verify: the suite fails, but not the way this issue says ==
+Verification: DIFFERENT-FAILURE (observed by running reproduce.sh on this machine)
+  the run failed for a different reason than the issue reports
+  expected (from the issue): ZeroDivisionError: integer division or modulo by zero; test_divide_by_zero
+  observed (from the run):   ValueError: invalid literal for int() with base 10: '-'; tests/test_evaluate.py::test_negative_operand
+  exception: mismatch
+  tests:     mismatch
+  note: the issue reports ZeroDivisionError, the run raised ValueError
+  note: the issue points at test_divide_by_zero, but the failing test(s) were tests/test_evaluate.py::test_negative_operand
+```
+
+### Verdicts and exit codes
+
+| Verdict | Exit | Meaning |
+| --- | --- | --- |
+| `reproduced` | 0 | the reported failure was observed |
+| `partial` | 1 | some of the signature matched, some did not |
+| `different-failure` | 1 | the reproduction step failed, but not this way |
+| `not-reproduced` | 1 | the reproduction step ran and exited 0 |
+| `environment-failure` | 2 | the script died during setup; nothing was tested |
+| `timed-out` | 2 | the run was killed before it finished |
+| `unknown` | 2 | the issue carries no signature to check against |
+
+Exit 1 means "not confirmed" and exit 2 means "could not tell". They are
+separate on purpose: a verifier that reports "could not tell" as though
+it were "no" is the same rubber stamp as one that reports it as "yes".
+
+### How the comparison works
+
+The signature is an exception type, its message, and the failing test
+names. The expected one comes from the issue: the exception line of a
+stack trace, plus test functions named by trace frames or by any pytest
+node id written into the text. The observed one comes from the run:
+pytest's `E ` failure detail and plain tracebacks first, and pytest's
+short summary line last, since pytest truncates that one.
+
+Each component compares to `match`, `mismatch`, or `unknown`, and
+`unknown` is never evidence in either direction. One mismatch alongside a
+match is `partial`, never `reproduced`. Messages compare as `exact`,
+`close` (a truncated prefix, a containment, or heavy word overlap), or
+`different`; a different message under a matching type is enough to make
+a verdict `partial`.
+
+Two ordering rules matter more than the comparison itself:
+
+- A failure during a **setup** step is decided before any signature is
+  compared. The reproduction never ran, so nothing in the output is
+  evidence about the bug, even when the output happens to contain the
+  reported exception. There is a test named for exactly that.
+- **The inferred confidence score is not overwritten** by a verdict. The
+  percentage measures how much checkable signal the issue carried; the
+  verdict measures what happened when the reproduction ran. "45%
+  inferred, reproduced" is more useful than either number alone, and
+  collapsing them would throw away the part that tells you whether to
+  trust the workspace on the next issue.
+
+Both are recorded in `metadata.json` under `verification`, and the full
+run output is written to `verify.log`.
+
+### Where it runs
+
+Docker is the default: `verify` builds the workspace `Dockerfile` and
+runs `reproduce.sh` inside the image, which is the right place for code
+that arrived from a stranger's issue tracker. The demo above passes
+`--no-docker` so it runs anywhere; the same issue verified in a container
+on Docker 28.0.4 reports the same verdict and names the image:
+
+```
+Verification: REPRODUCED (observed by running reproduce.sh in Docker (issue2repro-verify:example-tinycalc-1))
+  the run failed the way the issue describes
+  expected (from the issue): ValueError: invalid literal for int() with base 10: '-'; test_negative_operand
+  observed (from the run):   ValueError: invalid literal for int() with base 10: '-'; tests/test_evaluate.py::test_negative_operand
+  exception: match
+  message:   exact
+  tests:     match (test_negative_operand)
+```
+
+`--no-docker` runs the script directly on your machine instead, with the
+same warning `run` prints. When Docker is not installed, `verify` says so
+and names the flag rather than silently falling back to executing
+repository code on the host.
 
 ## Why?
 
@@ -103,6 +232,12 @@ and is honest about how far it got. When the issue has explicit steps
 and a matching traceback, you get a working reproduction script. When
 the issue is "app feels slow sometimes", you get a low confidence score
 that says so instead of a script that pretends.
+
+The second half of triage is the part a script normally cannot help
+with: deciding whether what just failed on your machine is what the
+reporter saw. `verify` does that comparison and refuses to guess, which
+is why three of its seven verdicts mean "not confirmed" and three mean
+"could not tell".
 
 ## Installation
 
@@ -122,6 +257,7 @@ uv pip install -e .
 issue2repro inspect URL   analyze and print the confidence breakdown, write nothing
 issue2repro build URL     write the reproduction workspace (default: ./repro)
 issue2repro run URL       build if needed, then execute reproduce.sh locally
+issue2repro verify URL    build if needed, run it in Docker, and check the failure
 ```
 
 `URL` is `https://github.com/OWNER/REPO/issues/N` or `OWNER/REPO#N`.
@@ -135,9 +271,16 @@ Options (all subcommands):
 --force             replace an existing workspace
 ```
 
-`run` executes repository code on your machine and warns before doing
-so. If you do not trust the project, build the workspace and use the
-generated Dockerfile instead. See SECURITY.md.
+`verify` also takes:
+
+```
+--no-docker         run reproduce.sh on this machine instead of in a container
+--timeout SECONDS   kill the run after this long (default: 900)
+```
+
+`run` and `verify --no-docker` execute repository code on your machine
+and warn before doing so. If you do not trust the project, use `verify`
+without `--no-docker` so the code runs in the container. See SECURITY.md.
 
 The workspace layout:
 
@@ -145,24 +288,31 @@ The workspace layout:
 repro/
   source/          shallow clone of the repository
   issue.md         the issue and comments, rendered
-  metadata.json    everything inferred, structured
+  metadata.json    everything inferred, structured, plus the step plan and
+                   (after verify) the verdict
   reproduce.sh     explicit steps from the issue, or the detected test
                    command scoped to files the stack trace implicates
   Dockerfile       best-effort environment for the ecosystem
+  .dockerignore    keeps host-built artifacts out of the verify image
+  verify.log       full output of the last verify run (written by verify)
 ```
 
 ## Architecture
 
 ```
 src/issue2repro/
-  cli.py          argparse CLI: inspect, build, run
+  cli.py          argparse CLI: inspect, build, run, verify
   github.py       issue URL parsing, gh api fetching, fixture loading, cloning
   extract.py      pure-text signal extraction: Python tracebacks, Node stack
                   frames, fenced commands, filenames, code references
   detect.py       ecosystem detection from manifests (pyproject/setup/
                   requirements for Python, package.json scripts for Node)
   confidence.py   weighted scoring plus trace-frame-to-clone path mapping
-  workspace.py    renders issue.md, metadata.json, reproduce.sh, Dockerfile
+  workspace.py    renders issue.md, metadata.json, reproduce.sh, Dockerfile,
+                  and plans the setup/repro step split
+  signature.py    pure: expected and observed failure signatures, and the
+                  comparison between them. Knows nothing about running
+  verify.py       runs a workspace (Docker or host) and decides the verdict
   models.py       dataclasses shared across the pipeline
 ```
 
@@ -172,29 +322,59 @@ clone (25, half credit if the trace matches nothing), test command
 detected (20), language detected (20). Every component prints the reason
 it earned or did not earn its points.
 
-Tests run entirely offline: issue payloads are committed JSON fixtures
-and repositories are built in temp directories, so CI never hits live
-GitHub.
+The verify path splits cleanly in two. `signature.py` is text in, verdict
+out, with no subprocess anywhere in it, so every comparison rule is
+tested directly. `verify.py` owns the execution, the step markers, and
+the ordering rules that decide a verdict before a comparison is reached.
+
+Tests run entirely offline: issue payloads are committed JSON fixtures,
+repositories are built in temp directories, and the end-to-end `verify`
+tests run scripts that import nothing, so no test needs the network,
+Docker, or live GitHub. `demo.sh` does execute real reproductions, which
+install the fixture project's test dependency exactly as a real
+reproduction would.
 
 ## Limitations
 
 - Python and Node only, for now (see ROADMAP.md for planned languages).
 - The Dockerfile is best effort: right base image and manifest install
   steps. It will not conjure system packages, databases, or the exact
-  interpreter version the reporter had.
+  interpreter version the reporter had. A project that needs any of those
+  will verify as an environment failure, which is the honest answer but
+  is not the answer you wanted.
 - Command extraction trusts fenced shell blocks; prose like "then I ran
   the tests" is not understood.
 - `reproduce.sh` isolates Python installs in a workspace venv, but `run`
-  is still arbitrary code execution by design.
+  and `verify --no-docker` are still arbitrary code execution by design.
 - Issues describing bugs in a different repository than the one they are
   filed against will map poorly.
+- **A signature match is a claim about text, not about code paths.**
+  Two different bugs that raise `KeyError: 'currency'` in the same test
+  compare as reproduced. The verdict block always prints both signatures
+  so the claim can be checked at a glance.
+- **The setup/repro split is a heuristic** over the command's first word:
+  a package manager asked to install, a `cd`, or an `export` is setup,
+  and the last command is always treated as the reproduction. A repro
+  step that looks like an install (`npm install` as the actual bug) is
+  labeled wrong. It costs a label on a verdict, not a wrong verdict:
+  verify only uses the split to decide whether the failure landed before
+  the reproduction ran.
+- Only failures are compared. A test that vanishes, is skipped, or is
+  renamed between the issue and today reads as "no per-test failures to
+  compare against", which is `unknown` rather than a mismatch.
+- Custom exception classes are recognized only when the issue names them.
+  The general matcher wants a conventional suffix (`Error`, `Exception`,
+  and relatives), so a bare `MyBadThing` in the run output is invisible
+  unless the issue's trace named `MyBadThing` too.
+- `verify` reruns the whole reproduction every time; there is no caching
+  of a previous run's image or result.
 
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md): more ecosystems (Rust, Go, Ruby, Java),
-interpreter version pinning, checkout of the version the issue names, a
-`verify` command that runs the repro in Docker and checks the failure
-signature, and batch triage over a whole issue tracker.
+interpreter version pinning, checkout of the version the issue names,
+richer verification (comparing frames, not just the exception line), and
+batch triage over a whole issue tracker.
 
 ## Contributing
 

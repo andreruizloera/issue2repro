@@ -1,0 +1,5 @@
+{
+  "title": "evaluate() raises ZeroDivisionError instead of reporting a bad expression",
+  "body": "Dividing by zero blows up with a raw `ZeroDivisionError` instead of the `ValueError` the docstring promises for invalid input.\n\nSteps to reproduce:\n\n```bash\npip install pytest\npython -m pytest tests/test_evaluate.py -x\n```\n\nOutput:\n\n```\nTraceback (most recent call last):\n  File \"tests/test_evaluate.py\", line 21, in test_divide_by_zero\n    assert evaluate(\"6 / 0\") == 0\n  File \"src/tinycalc/evaluate.py\", line 27, in evaluate\n    total = total // value\nZeroDivisionError: integer division or modulo by zero\n```\n\nExpected: a `ValueError` naming the offending expression.",
+  "comments": []
+}

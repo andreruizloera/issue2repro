@@ -55,6 +55,49 @@ def python_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def crash_repo(tmp_path: Path) -> Path:
+    """A Python project whose reproduction needs no installed dependencies.
+
+    `verify` runs real commands, so its end-to-end tests must not depend on
+    pip reaching an index. Both scripts here import nothing.
+    """
+    root = tmp_path / "crashrepo"
+    (root / "tools").mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "crashy"\nversion = "0.1.0"\ndependencies = []\n'
+    )
+    (root / "tools" / "repro.py").write_text(
+        "def widen(token):\n"
+        "    raise ValueError(\"invalid literal for int() with base 10: '-'\")\n"
+        "\n\n"
+        'if __name__ == "__main__":\n'
+        '    widen("-")\n'
+    )
+    (root / "tools" / "ok.py").write_text('print("nothing to see here")\n')
+    return root
+
+
+def write_issue(path: Path, command: str, error: str) -> Path:
+    """Write an issue payload whose repro step is `command` and whose
+    traceback ends in `error`. Keeps verdict tests readable without a
+    committed fixture file per case."""
+    body = (
+        "It blows up every time.\n\n"
+        f"```bash\n{command}\n```\n\n"
+        "```\n"
+        "Traceback (most recent call last):\n"
+        '  File "tools/repro.py", line 5, in <module>\n'
+        '    widen("-")\n'
+        '  File "tools/repro.py", line 2, in widen\n'
+        "    raise ValueError(...)\n"
+        f"{error}\n"
+        "```\n"
+    )
+    path.write_text(json.dumps({"title": "crash on widen()", "body": body, "comments": []}))
+    return path
+
+
+@pytest.fixture
 def node_repo(tmp_path: Path) -> Path:
     """A minimal Node project matching the node_issue fixture."""
     root = tmp_path / "noderepo"

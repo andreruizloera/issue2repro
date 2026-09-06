@@ -21,6 +21,13 @@ from issue2repro.github import (
     parse_issue_url,
 )
 from issue2repro.models import Analysis, Issue
+from issue2repro.verify import (
+    DEFAULT_TIMEOUT,
+    EXIT_CODES,
+    echo_stdout,
+    render_verification,
+    verify_workspace,
+)
 from issue2repro.workspace import write_workspace
 
 
@@ -68,7 +75,7 @@ def _print_analysis(analysis: Analysis) -> None:
     if signals.filenames:
         print(f"  filenames mentioned: {', '.join(signals.filenames[:8])}")
     print()
-    print(f"Reproduction confidence: {analysis.confidence.score}%")
+    print(f"Reproduction confidence: {analysis.confidence.score}% inferred")
     for c in analysis.confidence.components:
         print(f"  [{c.earned:>2}/{c.weight}] {c.name}: {c.reason}")
 
@@ -102,7 +109,14 @@ def _build_workspace(args: argparse.Namespace) -> Path:
     _print_analysis(analysis)
     print()
     print(f"Workspace written to {out_dir}/")
-    for name in ("source/", "issue.md", "metadata.json", "reproduce.sh", "Dockerfile"):
+    for name in (
+        "source/",
+        "issue.md",
+        "metadata.json",
+        "reproduce.sh",
+        "Dockerfile",
+        ".dockerignore",
+    ):
         print(f"  {name}")
     return out_dir
 
@@ -134,6 +148,31 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    out_dir = Path(args.output)
+    if not (out_dir / "reproduce.sh").exists():
+        out_dir = _build_workspace(args)
+        print()
+    use_docker = not args.no_docker
+    if use_docker:
+        print("Running the reproduction in Docker, built from the workspace Dockerfile.")
+    else:
+        print("WARNING: --no-docker runs reproduce.sh directly on this machine.")
+    print(flush=True)
+    verification = verify_workspace(
+        out_dir,
+        use_docker=use_docker,
+        timeout=args.timeout,
+        echo=echo_stdout,
+    )
+    print()
+    for line in render_verification(verification):
+        print(line)
+    print()
+    print(f"Full run output: {out_dir / 'verify.log'}")
+    return EXIT_CODES.get(verification.verdict, 2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="issue2repro",
@@ -149,6 +188,11 @@ def build_parser() -> argparse.ArgumentParser:
             "write the reproduction workspace (clone, issue.md, reproduce.sh, Dockerfile)",
         ),
         ("run", cmd_run, "build if needed, then execute reproduce.sh locally"),
+        (
+            "verify",
+            cmd_verify,
+            "run the reproduction in Docker and check the failure against the issue",
+        ),
     ):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("url", help="GitHub issue URL (or OWNER/REPO#NUMBER)")
@@ -171,6 +215,18 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="replace the output directory if it already exists",
         )
+        if name == "verify":
+            p.add_argument(
+                "--no-docker",
+                action="store_true",
+                help="run reproduce.sh on this machine instead of in a container",
+            )
+            p.add_argument(
+                "--timeout",
+                type=int,
+                default=DEFAULT_TIMEOUT,
+                help=f"seconds before the run is killed (default: {DEFAULT_TIMEOUT})",
+            )
         p.set_defaults(func=func)
     return parser
 
@@ -181,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except Issue2ReproError as exc:
         print(f"issue2repro: error: {exc}", file=sys.stderr)
-        return 1
+        return exc.exit_code
     except KeyboardInterrupt:
         print("issue2repro: interrupted", file=sys.stderr)
         return 130

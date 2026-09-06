@@ -108,6 +108,96 @@ class ConfidenceReport:
 
 
 @dataclass
+class Step:
+    """One command in reproduce.sh, with the role it plays.
+
+    ``kind`` is "setup" (bring the environment up) or "repro" (exercise the
+    reported bug). The split is what lets `verify` tell an install failure
+    apart from the failure the issue describes.
+    """
+
+    index: int
+    kind: str
+    command: str
+
+
+@dataclass
+class FailureSignature:
+    """What a failure looks like: an exception and the tests it broke.
+
+    Used for both the signature the issue describes (expected) and the one
+    a run actually produced (observed).
+    """
+
+    exception_type: str | None = None
+    exception_message: str | None = None
+    message_truncated: bool = False
+    tests: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return self.exception_type is None and not self.tests
+
+    def describe(self) -> str:
+        parts = []
+        if self.exception_type:
+            message = self.exception_message or ""
+            suffix = "..." if self.message_truncated else ""
+            parts.append(
+                f"{self.exception_type}: {message}{suffix}" if message else self.exception_type
+            )
+        if self.tests:
+            parts.append(", ".join(self.tests[:3]))
+        return "; ".join(parts) if parts else "nothing checkable"
+
+
+@dataclass
+class SignatureMatch:
+    """The per-component comparison of an expected and an observed signature.
+
+    Each component is "match", "mismatch", or "unknown"; "unknown" means
+    there was nothing on one side to compare, which is never evidence.
+    """
+
+    exception: str = "unknown"
+    message: str = "unknown"
+    tests: str = "unknown"
+    matched_tests: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def components(self) -> tuple[str, str, str]:
+        return (self.exception, self.message, self.tests)
+
+
+@dataclass
+class Verification:
+    """The result of running a workspace and comparing signatures."""
+
+    verdict: str
+    where: str
+    exit_code: int
+    expected: FailureSignature
+    observed: FailureSignature
+    match: SignatureMatch
+    failed_step: Step | None = None
+    reason: str = ""
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "verdict": self.verdict,
+            "where": self.where,
+            "exit_code": self.exit_code,
+            "reason": self.reason,
+            "failed_step": asdict(self.failed_step) if self.failed_step else None,
+            "expected": asdict(self.expected),
+            "observed": asdict(self.observed),
+            "match": asdict(self.match),
+        }
+
+
+@dataclass
 class Analysis:
     """The complete result of analyzing one issue against its repository."""
 

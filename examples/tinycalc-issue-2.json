@@ -1,0 +1,9 @@
+{
+  "title": "evaluate() crashes on negative numbers (repro steps from my branch)",
+  "body": "Same crash as before. Here is what I run locally:\n\n```bash\npip install -r requirements-dev.txt\npython -m pytest tests/test_evaluate.py -x\n```\n\nOutput:\n\n```\nTraceback (most recent call last):\n  File \"tests/test_evaluate.py\", line 13, in test_negative_operand\n    assert evaluate(\"2 + -3\") == -1\n  File \"src/tinycalc/evaluate.py\", line 23, in evaluate\n    value = int(tokens[i + 1])\nValueError: invalid literal for int() with base 10: '-'\n```\n\nExpected: `evaluate(\"2 + -3\")` returns `-1`.",
+  "comments": [
+    {
+      "body": "Note that requirements-dev.txt only exists on my working branch, it was never merged to main."
+    }
+  ]
+}

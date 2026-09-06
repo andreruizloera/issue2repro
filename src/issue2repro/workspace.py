@@ -5,9 +5,32 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from issue2repro.models import Analysis
+from issue2repro.models import Analysis, Step
 
 _DOCKER_BASES = {"python": "python:3.12-slim", "node": "node:20-slim"}
+
+# Commands that bring the environment up rather than exercise the bug.
+# A package manager only counts as setup when it is being asked to install:
+# "npm install" is setup, "npm test" is the reproduction.
+_PACKAGE_MANAGERS = {
+    "pip",
+    "pip3",
+    "uv",
+    "poetry",
+    "pipenv",
+    "conda",
+    "npm",
+    "yarn",
+    "pnpm",
+    "bundle",
+    "apt",
+    "apt-get",
+    "brew",
+}
+_INSTALL_VERBS = {"install", "add", "sync", "ci", "update", "upgrade"}
+_SETUP_HEADS = {"cd", "export", "env", "source", ".", "mkdir", "git", "chmod", "ln"}
+
+STEP_MARKER_PREFIX = "##issue2repro:step:"
 
 
 def render_issue_md(analysis: Analysis) -> str:
@@ -43,6 +66,55 @@ def _scoped_test_command(analysis: Analysis, mapped_paths: list[str]) -> str:
     return test_command
 
 
+def classify_step(command: str) -> str:
+    """Label a command "setup" or "repro".
+
+    A heuristic, and the README says so: a package manager asked to install,
+    a directory change, or an environment tweak is setup; anything else is
+    taken to be the command that exercises the bug. Getting this wrong costs
+    a label on a verdict, never a wrong verdict, because verify only uses it
+    to decide whether the failure happened before the reproduction ran.
+    """
+    parts = command.split()
+    while parts and "=" in parts[0] and not parts[0].startswith("-"):
+        parts = parts[1:]  # VAR=value prefixes
+    if not parts:
+        return "setup"
+    head = parts[0].rsplit("/", 1)[-1]
+    if head in _SETUP_HEADS:
+        return "setup"
+    if head in _PACKAGE_MANAGERS:
+        rest = {p for p in parts[1:] if not p.startswith("-")}
+        return "setup" if rest & _INSTALL_VERBS else "repro"
+    return "repro"
+
+
+def plan_steps(analysis: Analysis, mapped_paths: list[str]) -> list[Step]:
+    """The ordered commands reproduce.sh will run, each labeled setup or repro.
+
+    The last command is always the reproduction step. A script whose every
+    command looks like setup has nothing for verify to observe, and calling
+    its last line the reproduction is more useful than reporting that the
+    run never reached one.
+    """
+    project = analysis.project
+    if analysis.signals.commands:
+        commands = list(analysis.signals.commands)
+    else:
+        commands = list(project.install_commands)
+        scoped = _scoped_test_command(analysis, mapped_paths)
+        if scoped:
+            commands.append(scoped)
+    if not commands:
+        return []
+    steps = [
+        Step(index=i, kind=classify_step(command), command=command)
+        for i, command in enumerate(commands, start=1)
+    ]
+    steps[-1].kind = "repro"
+    return steps
+
+
 def render_reproduce_sh(analysis: Analysis, mapped_paths: list[str]) -> str:
     """Build reproduce.sh.
 
@@ -50,6 +122,10 @@ def render_reproduce_sh(analysis: Analysis, mapped_paths: list[str]) -> str:
     manifest install steps plus the detected test command, scoped to files
     the stack trace implicates. Python runs inside a workspace-local venv
     so pip installs never touch the caller's environment.
+
+    Each command is preceded by a step marker that stays silent unless
+    `issue2repro verify` sets ISSUE2REPRO_TRACE=1, so running the script by
+    hand prints exactly what it printed before this existed.
     """
     issue = analysis.issue
     project = analysis.project
@@ -62,6 +138,14 @@ def render_reproduce_sh(analysis: Analysis, mapped_paths: list[str]) -> str:
         "# Read it before running. A nonzero exit usually means the bug reproduced.",
         "set -euo pipefail",
         'WORKSPACE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+        "",
+        "# Step markers for `issue2repro verify`, so it can tell a setup failure",
+        "# apart from the failure the issue describes. Silent by default.",
+        "i2r_step() {",
+        '    if [ "${ISSUE2REPRO_TRACE:-}" = "1" ]; then',
+        f'        printf \'{STEP_MARKER_PREFIX}%s:%s\\n\' "$1" "$2"',
+        "    fi",
+        "}",
     ]
     if project.language == "python":
         lines += [
@@ -72,21 +156,44 @@ def render_reproduce_sh(analysis: Analysis, mapped_paths: list[str]) -> str:
         ]
     lines += ["", 'cd "$WORKSPACE/source"', ""]
 
+    steps = plan_steps(analysis, mapped_paths)
+    if not steps:
+        lines += [
+            "# No explicit steps in the issue and no test command was detected.",
+            'echo "issue2repro could not detect a test command for this project." >&2',
+            "exit 2",
+        ]
+        return "\n".join(lines) + "\n"
+
     if analysis.signals.commands:
         lines.append("# Explicit reproduction steps taken from the issue text.")
-        lines.extend(analysis.signals.commands)
     else:
         lines.append("# No explicit steps in the issue; running the detected test command.")
-        lines.extend(project.install_commands)
-        scoped = _scoped_test_command(analysis, mapped_paths)
-        if scoped:
-            lines.append(scoped)
-        else:
-            lines += [
-                'echo "issue2repro could not detect a test command for this project." >&2',
-                "exit 2",
-            ]
+    for step in steps:
+        lines.append(f"i2r_step {step.index} {step.kind}")
+        lines.append(step.command)
     return "\n".join(lines) + "\n"
+
+
+def render_dockerignore() -> str:
+    """Keep the verify build context small and free of host-built artifacts.
+
+    Without this, `verify` would upload the workspace venv that `run` leaves
+    behind, which is both slow and a Linux image full of macOS binaries.
+    """
+    return (
+        "\n".join(
+            [
+                "# Generated by issue2repro.",
+                ".venv/",
+                "verify.log",
+                "source/.git/",
+                "**/__pycache__/",
+                "**/node_modules/",
+            ]
+        )
+        + "\n"
+    )
 
 
 def render_dockerfile(analysis: Analysis) -> str:
@@ -131,6 +238,10 @@ def write_workspace(analysis: Analysis, mapped_paths: list[str], out_dir: Path) 
     metadata = out_dir / "metadata.json"
     payload = analysis.to_metadata()
     payload["trace_paths_in_clone"] = mapped_paths
+    payload["reproduce_steps"] = [
+        {"index": s.index, "kind": s.kind, "command": s.command}
+        for s in plan_steps(analysis, mapped_paths)
+    ]
     metadata.write_text(json.dumps(payload, indent=2) + "\n")
     written.append(metadata)
 
@@ -142,5 +253,9 @@ def write_workspace(analysis: Analysis, mapped_paths: list[str], out_dir: Path) 
     dockerfile = out_dir / "Dockerfile"
     dockerfile.write_text(render_dockerfile(analysis))
     written.append(dockerfile)
+
+    dockerignore = out_dir / ".dockerignore"
+    dockerignore.write_text(render_dockerignore())
+    written.append(dockerignore)
 
     return written

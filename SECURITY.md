@@ -18,9 +18,25 @@ issue2repro consumes untrusted input on two fronts:
   header and is meant to be read before it is run.
 - `run` executes `reproduce.sh` on your machine and says so loudly
   first. Treat it exactly like running that repository's test suite
-  yourself: it is arbitrary code execution by design. Prefer building
-  the generated Dockerfile and running inside the container when you do
-  not trust the project.
+  yourself: it is arbitrary code execution by design.
+- `verify` is the containerized path and is the one to prefer for code
+  you do not trust. It builds the generated Dockerfile and runs
+  `reproduce.sh` inside the image. When Docker is missing it stops with
+  an error naming `--no-docker`; it never silently falls back to running
+  repository code on the host. `--no-docker` is opt-in and prints the
+  same warning `run` does.
+- The container is not a security boundary against a determined attacker.
+  It runs with Docker's defaults and with network access, because
+  reproductions install dependencies. It is a boundary against a
+  reproduction that trashes your working directory, not against a
+  container escape.
+- The verify image tag is derived from the issue's owner, repo, and
+  number with every character Docker does not accept replaced, so issue
+  metadata cannot inject arguments into the `docker build` command line.
+  Docker and git are invoked with fixed argument lists, never through a
+  shell.
+- `ISSUE2REPRO_TRACE` only makes `reproduce.sh` print step markers. The
+  script's behavior is identical with and without it.
 - For Python projects, `reproduce.sh` installs into a workspace-local
   virtualenv so issue-supplied `pip install` lines do not modify your
   system or user environment. This limits pollution, not malice.

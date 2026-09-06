@@ -12,7 +12,16 @@ from issue2repro.models import Issue, IssueRef
 
 
 class Issue2ReproError(Exception):
-    """Expected failure with a clean, user-facing message."""
+    """Expected failure with a clean, user-facing message.
+
+    ``exit_code`` lets a caller distinguish "this went wrong" (1) from
+    "issue2repro could not tell" (2), which `verify` relies on: a missing
+    Docker is not a failed verification.
+    """
+
+    def __init__(self, message: str, exit_code: int = 1) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
 
 
 _URL_RE = re.compile(

@@ -6,7 +6,11 @@ from issue2repro.detect import detect_project
 from issue2repro.extract import extract_signals
 from issue2repro.models import Analysis, Signals
 from issue2repro.workspace import (
+    STEP_MARKER_PREFIX,
+    classify_step,
+    plan_steps,
     render_dockerfile,
+    render_dockerignore,
     render_issue_md,
     render_reproduce_sh,
     write_workspace,
@@ -61,6 +65,79 @@ class TestReproduceSh:
         assert "exit 2" in script
 
 
+class TestStepClassification:
+    def test_installers_are_setup(self):
+        for command in (
+            "pip install -e .",
+            "pip3 install -r requirements.txt",
+            "uv pip install pytest",
+            "poetry install",
+            "npm install",
+            "npm ci",
+            "yarn add left-pad",
+            "apt-get install -y libpq-dev",
+        ):
+            assert classify_step(command) == "setup", command
+
+    def test_environment_and_navigation_are_setup(self):
+        for command in ("cd packages/core", "export DEBUG=1", "git checkout v2.1.0"):
+            assert classify_step(command) == "setup", command
+
+    def test_a_package_manager_not_installing_is_a_reproduction(self):
+        # the distinction the classifier exists for: npm test is the bug, not the setup
+        assert classify_step("npm test") == "repro"
+        assert classify_step("npm run build") == "repro"
+        assert classify_step("poetry run pytest") == "repro"
+
+    def test_test_runners_are_reproduction_steps(self):
+        for command in ("python -m pytest -x", "pytest tests/", "node --test", "make check"):
+            assert classify_step(command) == "repro", command
+
+    def test_variable_prefixes_are_looked_through(self):
+        assert classify_step("PIP_NO_CACHE=1 pip install .") == "setup"
+        assert classify_step("TZ=UTC python -m pytest") == "repro"
+
+    def test_the_last_step_is_always_the_reproduction(self, python_issue, python_repo):
+        analysis, mapped = build_analysis(python_issue, python_repo)
+        analysis.signals.commands = ["pip install -e .", "pip install pytest"]
+        steps = plan_steps(analysis, mapped)
+        assert [s.kind for s in steps] == ["setup", "repro"]
+
+    def test_explicit_commands_are_planned_in_order(self, python_issue, python_repo):
+        analysis, mapped = build_analysis(python_issue, python_repo)
+        steps = plan_steps(analysis, mapped)
+        assert [s.command for s in steps] == [
+            "pip install -e .",
+            "python -m pytest tests/test_parser.py -x",
+        ]
+        assert [s.kind for s in steps] == ["setup", "repro"]
+        assert [s.index for s in steps] == [1, 2]
+
+    def test_nothing_to_run_plans_no_steps(self, vague_issue, tmp_path):
+        analysis, mapped = build_analysis(vague_issue, tmp_path)
+        assert plan_steps(analysis, mapped) == []
+
+
+class TestStepMarkers:
+    def test_every_step_is_marked(self, python_issue, python_repo):
+        analysis, mapped = build_analysis(python_issue, python_repo)
+        script = render_reproduce_sh(analysis, mapped)
+        assert "i2r_step 1 setup" in script
+        assert "i2r_step 2 repro" in script
+        assert STEP_MARKER_PREFIX in script
+
+    def test_markers_are_silent_unless_verify_asks(self, python_issue, python_repo):
+        analysis, mapped = build_analysis(python_issue, python_repo)
+        script = render_reproduce_sh(analysis, mapped)
+        assert 'if [ "${ISSUE2REPRO_TRACE:-}" = "1" ]; then' in script
+
+    def test_a_script_with_nothing_to_run_still_exits_2(self, vague_issue, tmp_path):
+        analysis, mapped = build_analysis(vague_issue, tmp_path)
+        script = render_reproduce_sh(analysis, mapped)
+        assert "exit 2" in script
+        assert "i2r_step 1" not in script
+
+
 class TestDockerfile:
     def test_python_base_and_installs(self, python_issue, python_repo):
         analysis, _ = build_analysis(python_issue, python_repo)
@@ -98,8 +175,26 @@ class TestWriteWorkspace:
         out = tmp_path / "repro"
         written = write_workspace(analysis, mapped, out)
         names = sorted(p.name for p in written)
-        assert names == ["Dockerfile", "issue.md", "metadata.json", "reproduce.sh"]
+        assert names == [".dockerignore", "Dockerfile", "issue.md", "metadata.json", "reproduce.sh"]
         assert (out / "reproduce.sh").stat().st_mode & 0o111
+
+    def test_dockerignore_keeps_host_artifacts_out_of_the_image(self):
+        text = render_dockerignore()
+        assert ".venv/" in text
+        assert "verify.log" in text
+
+    def test_metadata_records_the_step_plan(self, python_issue, python_repo, tmp_path):
+        analysis, mapped = build_analysis(python_issue, python_repo)
+        write_workspace(analysis, mapped, tmp_path / "repro")
+        meta = json.loads((tmp_path / "repro" / "metadata.json").read_text())
+        assert meta["reproduce_steps"] == [
+            {"index": 1, "kind": "setup", "command": "pip install -e ."},
+            {
+                "index": 2,
+                "kind": "repro",
+                "command": "python -m pytest tests/test_parser.py -x",
+            },
+        ]
 
     def test_metadata_structure(self, python_issue, python_repo, tmp_path):
         analysis, mapped = build_analysis(python_issue, python_repo)

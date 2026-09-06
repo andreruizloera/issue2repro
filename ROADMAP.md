@@ -31,11 +31,27 @@ implemented today; the README only documents what works now.
 
 ## Reproduction verification
 
-- `issue2repro verify`: run reproduce.sh inside the generated Docker
-  image and report whether the failure signature (exception type, failing
-  test id) matches what the issue describes, upgrading the confidence
-  score from "inferred" to "observed".
-- Sandboxed local runs (container by default, host only with a flag).
+`issue2repro verify` shipped: it runs reproduce.sh in the generated
+Docker image (container by default, host only with `--no-docker`),
+compares the failure it observed against the one the issue describes, and
+reports a verdict beside the inferred confidence score rather than
+overwriting it. What is still open:
+
+- Compare stack frames, not just the exception line. Two `KeyError:
+  'currency'` failures raised in different functions currently read as
+  the same signature.
+- Cache the built image and the verdict, keyed by the clone's HEAD and
+  the step plan, so re-verifying an issue after a fix costs one run
+  instead of two.
+- Recognize more runners' per-test output: `unittest`, `node --test`,
+  `cargo test`, and `go test` all report failing tests in formats verify
+  does not read yet, so on those projects only the exception line is
+  compared.
+- Treat a target test that has been deleted or renamed as its own
+  verdict, instead of folding it into "no per-test failures to compare".
+- Optional `--network none` on the container for projects whose
+  reproduction needs no installs, so the run cannot reach the internet at
+  all.
 
 ## Quality of life
 
