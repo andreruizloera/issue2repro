@@ -23,7 +23,7 @@ jobs:
       - name: Lint
         run: ruff check src tests examples
       - name: Tests
-        run: python -m pytest -q
+        run: pytest -q
       - name: Demo
         run: ./demo.sh
 
