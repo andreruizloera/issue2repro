@@ -734,3 +734,105 @@ class TestNativePanicSignatures:
         present, which is the case a polyglot repository produces."""
         frames, source = observed_frames(PYTEST_OUTPUT + "\n" + go_test_panic)
         assert source == "pytest traceback frames"
+
+
+class TestJvmSignatures:
+    """The JVM half, run against real OpenJDK 26 and JUnit 5 output.
+
+    Unlike Go and Rust, the JVM names a real exception class, so these
+    signatures carry a type and a message as well as frames.
+    """
+
+    def test_the_exception_line_is_read_from_a_caused_by_chain(self, jvm_caused_by):
+        """The header the JVM actually prints begins with `Exception in
+        thread "main" `, which the anchored line scanner cannot match. Before
+        this feature the type came back None for every real JVM failure."""
+        signature = observed_signature(jvm_caused_by)
+        assert signature.exception_type == "java.lang.NullPointerException"
+        assert signature.exception_message is not None
+        assert signature.exception_message.startswith("Cannot invoke")
+        assert "jvm exception line in the output" in signature.sources
+
+    def test_the_root_cause_not_the_wrapper_is_reported(self, jvm_caused_by):
+        """`IllegalStateException: checkout failed` is the rethrow in the
+        catch block; the NullPointerException under it is the bug."""
+        signature = observed_signature(jvm_caused_by)
+        assert signature.exception_type != "java.lang.IllegalStateException"
+        assert signature.frames[-1].symbol == "applyCoupon"
+        assert signature.frames[-1].path == "Pricing.java"
+
+    def test_a_jvm_exception_is_not_called_a_panic(self, jvm_caused_by):
+        """Go and Rust panic; the JVM throws. Naming it a panic in the
+        evidence a reader checks the verdict against would be a small lie."""
+        signature = observed_signature(jvm_caused_by)
+        assert "jvm exception frames in the output" in signature.sources
+        assert not any("panic" in source for source in signature.sources)
+
+    def test_junit_failing_test_names_are_read(self, jvm_junit_assertion):
+        signature = observed_signature(jvm_junit_assertion)
+        assert signature.tests == ["TaxTest::couponIsSubtractedFromTheTotal"]
+        assert "JUnit failure lines" in signature.sources
+
+    def test_an_issue_pasting_a_jvm_trace_gets_a_full_signature(self, jvm_caused_by):
+        text = f"The checkout crashes.\n\n```\n{jvm_caused_by}```\n"
+        signature = expected_signature(extract_signals(text), text)
+        assert signature.exception_type == "java.lang.NullPointerException"
+        assert signature.frames[-1].symbol == "applyCoupon"
+        assert not signature.is_empty
+
+    def test_a_reproduced_jvm_bug_reads_as_reproduced(self, jvm_caused_by):
+        text = f"```\n{jvm_caused_by}```\n"
+        expected = expected_signature(extract_signals(text), text)
+        observed = observed_signature(jvm_caused_by, expected.exception_type)
+        match = compare_signatures(expected, observed)
+        assert match.exception == "match"
+        assert match.frames == "match"
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_two_unrelated_assertion_failures_do_not_match(self, jvm_junit_assertion):
+        """THE FALSE-MATCH CASE, and the reason the harness filter exists.
+        Both of these are a failed assertEquals, so both are built by the
+        same six frames of JUnit machinery. Only the test method below that
+        machinery tells them apart."""
+        other = jvm_junit_assertion.replace(
+            "com.example.shop.TaxTest.couponIsSubtractedFromTheTotal(TaxTest.java:16)",
+            "com.example.shop.ShippingTest.heavyParcelsCostMore(ShippingTest.java:11)",
+        )
+        left, _ = observed_frames(jvm_junit_assertion)
+        right, _ = observed_frames(other)
+        assert left[-1].symbol == "couponIsSubtractedFromTheTotal"
+        assert right[-1].symbol == "heavyParcelsCostMore"
+        assert compare_frames(left, right)[0] == "mismatch"
+
+
+class TestQualifiedExceptionNames:
+    """A fully qualified class name and its simple name are the same class."""
+
+    def test_a_simple_name_matches_a_qualified_one(self):
+        """A reporter writes `NullPointerException`; the runtime prints
+        `java.lang.NullPointerException`. Calling that a MISMATCH would be
+        worse than the `unknown` this feature replaces, because a mismatch
+        is positive evidence against a reproduction."""
+        expected = FailureSignature(exception_type="NullPointerException")
+        observed = FailureSignature(exception_type="java.lang.NullPointerException")
+        assert compare_signatures(expected, observed).exception == "match"
+
+    def test_two_different_qualified_names_still_mismatch(self):
+        """When BOTH sides carry a package, a difference is a real one: two
+        packages may each define a `ValueError`."""
+        expected = FailureSignature(exception_type="com.example.a.ValueError")
+        observed = FailureSignature(exception_type="com.example.b.ValueError")
+        assert compare_signatures(expected, observed).exception == "mismatch"
+
+    def test_two_different_simple_names_still_mismatch(self):
+        expected = FailureSignature(exception_type="IllegalStateException")
+        observed = FailureSignature(exception_type="NullPointerException")
+        assert compare_signatures(expected, observed).exception == "mismatch"
+
+    def test_the_rule_helps_python_too(self):
+        """This was never a JVM-only problem: a Python reporter writes
+        `HTTPError` where the traceback says
+        `requests.exceptions.HTTPError`."""
+        expected = FailureSignature(exception_type="HTTPError")
+        observed = FailureSignature(exception_type="requests.exceptions.HTTPError")
+        assert compare_signatures(expected, observed).exception == "match"

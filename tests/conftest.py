@@ -74,6 +74,28 @@ def rust_test_backtrace() -> str:
 
 
 @pytest.fixture
+def jvm_caused_by() -> str:
+    """Real uncaught-exception output from `java` under OpenJDK 26.
+
+    An `IllegalStateException` rethrown from a catch block over the
+    `NullPointerException` that actually broke, so it carries a `Caused by:`
+    chain and the `... 1 more` truncation the JVM prints with it.
+    """
+    return load_output("jvm_caused_by.txt")
+
+
+@pytest.fixture
+def jvm_junit_assertion() -> str:
+    """Real JUnit 5 console launcher output under OpenJDK 26.
+
+    A failed `assertEquals`, which is the case that makes the harness-frame
+    filter load bearing: six frames of assertion machinery sit above the
+    test method, and JUnit prints its frames with no `at` keyword.
+    """
+    return load_output("jvm_junit_assertion.txt")
+
+
+@pytest.fixture
 def python_repo(tmp_path: Path) -> Path:
     """A minimal Python project matching the python_issue fixture."""
     root = tmp_path / "pyrepo"

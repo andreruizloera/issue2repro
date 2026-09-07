@@ -1,0 +1,39 @@
+
+Thanks for using JUnit! Support its development at https://junit.org/sponsoring
+
+╷
+├─ JUnit Platform Suite ✔
+├─ JUnit Jupiter ✔
+│  └─ TaxTest ✔
+│     └─ couponIsSubtractedFromTheTotal() ✘ expected: <910> but was: <900>
+└─ JUnit Vintage ✔
+
+Failures (1):
+  JUnit Jupiter:TaxTest:couponIsSubtractedFromTheTotal()
+    MethodSource [className = 'com.example.shop.TaxTest', methodName = 'couponIsSubtractedFromTheTotal', methodParameterTypes = '']
+    => org.opentest4j.AssertionFailedError: expected: <910> but was: <900>
+       org.junit.jupiter.api.AssertionFailureBuilder.build(AssertionFailureBuilder.java:151)
+       org.junit.jupiter.api.AssertionFailureBuilder.buildAndThrow(AssertionFailureBuilder.java:132)
+       org.junit.jupiter.api.AssertEquals.failNotEqual(AssertEquals.java:197)
+       org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:150)
+       org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:145)
+       org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:531)
+       com.example.shop.TaxTest.couponIsSubtractedFromTheTotal(TaxTest.java:16)
+       java.base/java.lang.reflect.Method.invoke(Method.java:565)
+       java.base/java.util.ArrayList.forEach(ArrayList.java:1612)
+       java.base/java.util.ArrayList.forEach(ArrayList.java:1612)
+
+Test run finished after 80 ms
+[         4 containers found      ]
+[         0 containers skipped    ]
+[         4 containers started    ]
+[         0 containers aborted    ]
+[         4 containers successful ]
+[         0 containers failed     ]
+[         1 tests found           ]
+[         0 tests skipped         ]
+[         1 tests started         ]
+[         0 tests aborted         ]
+[         0 tests successful      ]
+[         1 tests failed          ]
+

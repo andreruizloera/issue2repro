@@ -2,6 +2,7 @@ from issue2repro.extract import (
     extract_commands,
     extract_filenames,
     extract_go_traces,
+    extract_jvm_traces,
     extract_node_traces,
     extract_python_traces,
     extract_rust_traces,
@@ -289,3 +290,137 @@ class TestRustTraces:
         text = "Error: boom\n    at load (/app/src/index.js:4:11)\n    at /app/src/main.js:9:3\n"
         trace = extract_node_traces(text)[0]
         assert [f.symbol for f in trace.frames] == ["load", None]
+
+
+class TestJvmTraces:
+    def test_an_uncaught_exception_is_read(self):
+        """The `Exception in thread "main"` header is the ordinary shape, and
+        it is exactly the one the line scanner cannot see, because its
+        pattern is anchored at column zero and this line begins with prose."""
+        text = (
+            'Exception in thread "main" java.lang.IllegalArgumentException: bad rate\n'
+            "\tat com.example.shop.Pricing.applyRate(Pricing.java:22)\n"
+            "\tat com.example.shop.Checkout.main(Checkout.java:8)\n"
+        )
+        trace = extract_jvm_traces(text)[0]
+        assert trace.language == "jvm"
+        assert trace.error == "java.lang.IllegalArgumentException: bad rate"
+        assert [f.symbol for f in trace.frames] == ["applyRate", "main"]
+        assert trace.frames[0].path == "Pricing.java"
+        assert trace.frames[0].line == 22
+        # The JVM prints innermost first, so normalizing puts the frame that
+        # raised last, the same as every other language.
+        assert outermost_first(trace)[-1].symbol == "applyRate"
+
+    def test_the_root_cause_wins_not_the_wrapper(self, jvm_caused_by):
+        """A rethrow in a catch block is the handler, not the bug. Every
+        caller takes the LAST trace, so emitting one trace per link puts the
+        deepest cause where the comparison will look."""
+        traces = extract_jvm_traces(jvm_caused_by)
+        assert [t.error.split(":")[0] for t in traces] == [
+            "java.lang.IllegalStateException",
+            "java.lang.NullPointerException",
+        ]
+        assert outermost_first(traces[-1])[-1].symbol == "applyCoupon"
+        assert outermost_first(traces[-1])[-1].path == "Pricing.java"
+
+    def test_the_more_marker_ends_a_cause(self, jvm_caused_by):
+        """`... 1 more` truncates the shared tail of the cause's stack. It
+        terminates the frame list rather than being read as one."""
+        cause = extract_jvm_traces(jvm_caused_by)[-1]
+        assert [f.line for f in cause.frames] == [13, 9]
+        assert "... 1 more" in jvm_caused_by
+
+    def test_assertion_machinery_and_reflection_frames_are_dropped(self, jvm_junit_assertion):
+        """THE FILTER IS LOAD BEARING. JUnit builds the error inside its own
+        assertion machinery, so six `org.junit.jupiter.api` frames sit above
+        the test method and four JDK reflection frames sit below it. Compared
+        as printed, the innermost frame of every failed assertEquals in the
+        world is AssertionFailureBuilder.build, so two unrelated failures
+        would agree and score a match."""
+        trace = extract_jvm_traces(jvm_junit_assertion)[-1]
+        assert [f.symbol for f in trace.frames] == ["couponIsSubtractedFromTheTotal"]
+        assert not any("junit" in f.path.lower() for f in trace.frames)
+        assert not any(f.path == "Method.java" for f in trace.frames)
+        # The machinery really is present in the fixture; this is a filter,
+        # not an input that happened to be clean.
+        assert "AssertionFailureBuilder.build" in jvm_junit_assertion
+        assert "java.base/java.lang.reflect.Method.invoke" in jvm_junit_assertion
+
+    def test_junit_frames_have_no_at_keyword(self, jvm_junit_assertion):
+        """Found by running the console launcher rather than assumed: it
+        prints frames indented under the `=>` line with no `at`, which is the
+        one JVM shape where the `File.java:13` location is the only thing
+        separating a frame from prose."""
+        assert "       com.example.shop.TaxTest.couponIsSubtractedFromTheTotal(" in (
+            jvm_junit_assertion
+        )
+        assert "\tat com.example.shop.TaxTest" not in jvm_junit_assertion
+        trace = extract_jvm_traces(jvm_junit_assertion)[-1]
+        assert trace.frames and trace.frames[0].line == 16
+
+    def test_the_arrow_header_is_read(self, jvm_junit_assertion):
+        """JUnit heads the exception with `=> `, so the type is on a line the
+        anchored scanner cannot match either."""
+        trace = extract_jvm_traces(jvm_junit_assertion)[-1]
+        assert trace.error == "org.opentest4j.AssertionFailedError: expected: <910> but was: <900>"
+
+    def test_a_frame_with_no_source_location_is_skipped(self):
+        """`(Native Method)` and `(Unknown Source)` are frames with nowhere to
+        point. They are dropped rather than recorded with a made-up site."""
+        text = (
+            "java.lang.RuntimeException: boom\n"
+            "\tat com.example.Native.call(Native Method)\n"
+            "\tat com.example.Gen.run(Unknown Source)\n"
+            "\tat com.example.Real.work(Real.java:7)\n"
+        )
+        trace = extract_jvm_traces(text)[0]
+        assert [f.symbol for f in trace.frames] == ["work"]
+
+    def test_a_header_with_no_frames_is_not_a_trace(self):
+        """Without this rule any prose sentence ending in `Error` opens a
+        trace. A header has to be followed by something frame-shaped."""
+        assert extract_jvm_traces("I hit a java.lang.IllegalStateException here.\n") == []
+        assert extract_jvm_traces("ScaryError: it broke\n\nand then I gave up\n") == []
+
+    def test_a_node_stack_is_not_read_as_a_jvm_trace(self):
+        """The same collision the Rust guard exists for. Node writes
+        `at fn (path:1:2)` with a space before the paren; the JVM writes
+        `at fq(File.java:13)` without one, and the location has to name a
+        JVM source file."""
+        text = (
+            "TypeError: boom\n"
+            "    at applyRate (/app/src/pricing.js:14:11)\n"
+            "    at checkout (/app/src/checkout.js:8:3)\n"
+        )
+        assert extract_jvm_traces(text) == []
+        assert [t.language for t in extract_signals(text).traces] == ["node"]
+
+    def test_a_python_traceback_is_not_read_as_a_jvm_trace(self):
+        text = (
+            "Traceback (most recent call last):\n"
+            '  File "/app/x.py", line 3, in main\n'
+            "    go()\n"
+            "ValueError: boom\n"
+        )
+        assert extract_jvm_traces(text) == []
+
+    def test_a_rust_backtrace_is_not_read_as_a_jvm_trace(self, rust_test_backtrace):
+        assert extract_jvm_traces(rust_test_backtrace) == []
+
+    def test_a_kotlin_file_is_recognized(self):
+        """Kotlin and Scala compile to the same trace format; only the file
+        extension differs."""
+        text = (
+            "kotlin.KotlinNullPointerException: boom\n"
+            "\tat com.example.shop.PricingKt.applyRate(Pricing.kt:9)\n"
+        )
+        trace = extract_jvm_traces(text)[0]
+        assert trace.frames[0].path == "Pricing.kt"
+        assert trace.frames[0].symbol == "applyRate"
+
+    def test_the_signals_list_includes_jvm_traces(self, jvm_caused_by):
+        assert [t.language for t in extract_signals(jvm_caused_by).traces] == [
+            "jvm",
+            "jvm",
+        ]

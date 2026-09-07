@@ -200,6 +200,29 @@ check "$WORK/goshop.txt" "[25/25] stack trace: go stack trace maps to existing f
 check "$WORK/goshop.txt" "Language: unknown"
 check "$WORK/goshop.txt" "Reproduction confidence: 60% inferred"
 
+# A Java bug report, whose trace carries a `Caused by:` chain. Same shape as
+# the Go part: the JVM exception is read and its frames map onto real files,
+# while the language and test command stay honestly undetected. The two
+# checked trace lines are the point, because the rethrown
+# IllegalStateException is the handler and the NullPointerException under it
+# is the bug.
+cp -R "$ROOT/examples/javashop" "$WORK/javashop"
+git -C "$WORK/javashop" init --quiet
+git -C "$WORK/javashop" add --all
+git -C "$WORK/javashop" -c user.name=fixture -c user.email=fixture@example.invalid \
+    commit --quiet --message "javashop demo fixture"
+
+echo "== issue2repro inspect: a JVM exception chain, read from the issue =="
+"${I2R[@]}" inspect "https://github.com/example/javashop/issues/1" \
+    --issue-file "$ROOT/examples/javashop-issue-1.json" \
+    --clone-url "file://$WORK/javashop" | tee "$WORK/javashop.txt"
+
+check "$WORK/javashop.txt" "  stack trace: jvm, 2 frame(s) (java.lang.IllegalStateException: checkout failed)"
+check "$WORK/javashop.txt" "  stack trace: jvm, 2 frame(s) (java.lang.NullPointerException: Cannot invoke"
+check "$WORK/javashop.txt" "[25/25] stack trace: jvm stack trace maps to existing file(s): src/main/java/com/example/shop/Service.java, src/main/java/com/example/shop/Pricing.java"
+check "$WORK/javashop.txt" "Language: unknown"
+check "$WORK/javashop.txt" "Reproduction confidence: 60% inferred"
+
 echo
 if [ "$FAILURES" -ne 0 ]; then
     echo "demo.sh: $FAILURES check(s) failed. The README and the tool disagree." >&2

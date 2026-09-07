@@ -1,9 +1,9 @@
 """Extract reproduction signals from raw issue text.
 
 Recognizes Python tracebacks, Node stack traces, Go panics, Rust panics,
-fenced command blocks, filenames, and inline code references. Pure
-functions over strings so the whole module is testable offline with
-fixture payloads.
+JVM exceptions, fenced command blocks, filenames, and inline code
+references. Pure functions over strings so the whole module is testable
+offline with fixture payloads.
 """
 
 from __future__ import annotations
@@ -88,11 +88,87 @@ _RUST_RUNTIME_SYMBOLS = (
 )
 _RUST_RUNTIME_PATHS = ("/rustlib/", "/.cargo/registry/", "/.rustup/")
 
+# --------------------------------------------------------------------------
+# The JVM
+#
+# Unlike Go and Rust, the JVM names a real exception class, so its header
+# line carries a type and a message the way Python's does. What it does NOT
+# carry is a path: a frame names `Pricing.java`, a bare file name with no
+# directory at all, so the comparison rests on the class and method rather
+# than on a location.
+# --------------------------------------------------------------------------
+
+# `Exception in thread "main" java.lang.NullPointerException: Cannot invoke ...`
+# and the bare form, which is what a nested or logged trace prints.
+_JVM_HEADER = re.compile(
+    r'^(?:Exception in thread "[^"]*"\s+)?'
+    r"(?P<cls>[A-Za-z_$][\w.$]*(?:Exception|Error|Throwable))"
+    r"(?::\s?(?P<message>.*))?$"
+)
+
+# `Caused by: java.lang.NullPointerException: ...`, and the suppressed
+# variant the JVM prints under a try-with-resources failure.
+_JVM_CAUSED_BY = re.compile(
+    r"^\s*(?:Caused by|Suppressed):\s+(?P<cls>[A-Za-z_$][\w.$]*)(?::\s?(?P<message>.*))?$"
+)
+
+# JUnit's console launcher heads the failing exception with an arrow instead
+# of printing it at column zero: `=> java.lang.NullPointerException: ...`.
+_JVM_ARROW = re.compile(r"^\s*=>\s+(?P<cls>[A-Za-z_$][\w.$]*)(?::\s?(?P<message>.*))?$")
+
+# `\tat com.example.shop.Pricing.applyCoupon(Pricing.java:13)`, optionally
+# with a module or classloader prefix: `at java.base/java.util.Map.get(...)`.
+_JVM_FRAME = re.compile(
+    r"^\s+at\s+(?:(?P<module>[\w.@$/-]+)/)?(?P<fq>[\w.$<>]+)\((?P<loc>[^)]*)\)\s*$"
+)
+
+# The JUnit console launcher prints the SAME frames with no `at` keyword and
+# no tab, indented under the arrow line. Verified by running it: this is the
+# only shape in which a frame is not introduced by `at`, and the
+# `File.java:13` location is the only thing distinguishing it from prose, so
+# the location match below is what makes accepting it safe.
+_JVM_BARE_FRAME = re.compile(
+    r"^\s+(?:(?P<module>[\w.@$/-]+)/)?(?P<fq>[\w.$<>]+)\((?P<loc>[^)]*)\)\s*$"
+)
+
+# A frame is only taken when it names a real source file and line. `at
+# java.base/java.lang.Thread.run(Native Method)` and `(Unknown Source)` are
+# frames with nowhere to point, and they are skipped rather than recorded
+# with a made-up location.
+_JVM_LOC = re.compile(r"^(?P<file>[\w$-]+\.(?:java|kt|kts|scala|groovy)):(?P<line>\d+)$")
+
+_JVM_MORE = re.compile(r"^\s+\.\.\.\s+\d+\s+more\s*$")
+
+# Packages belonging to the test harness, the assertion library, or the JDK
+# itself. Filtering these is not tidiness: see `_is_jvm_runtime`.
+_JVM_RUNTIME_SYMBOLS = (
+    "org.junit.",
+    "junit.framework.",
+    "org.opentest4j.",
+    "org.hamcrest.",
+    "org.testng.",
+    "org.assertj.",
+    "org.mockito.",
+    "org.scalatest.",
+    "kotlin.test.",
+    "org.apache.maven.surefire.",
+    "org.apache.maven.plugin.surefire.",
+    "org.gradle.",
+    "worker.org.gradle.",
+    "jdk.internal.",
+    "sun.reflect.",
+    "java.lang.reflect.",
+    "java.base/",
+)
+
+# JDK modules, as they appear in the `module/` prefix of a frame.
+_JVM_RUNTIME_MODULES = ("java.", "jdk.")
+
 # Languages whose runtime prints the innermost frame first. Their frames are
 # reversed on the way out of the extractor so that ``frames[-1]`` is the
 # frame that failed for every language, which is the invariant every
 # comparison downstream is written against.
-_INNERMOST_FIRST = frozenset({"node", "go", "rust"})
+_INNERMOST_FIRST = frozenset({"node", "go", "rust", "jvm"})
 
 _FENCE = re.compile(r"^```(?P<lang>[\w+-]*)\s*$")
 
@@ -351,6 +427,109 @@ def extract_go_traces(text: str) -> list[StackTrace]:
     return traces
 
 
+def _is_jvm_runtime(fq: str, module: str | None) -> bool:
+    """True for a JVM frame belonging to the JDK, the harness, or an
+    assertion library.
+
+    This filter is load bearing rather than cosmetic, and an assertion
+    failure is what shows why. JUnit builds the error inside its own
+    assertion machinery, so `assertEquals(910, ...)` failing prints six
+    frames of `org.junit.jupiter.api.*` ABOVE the test method, innermost
+    first:
+
+        org.junit.jupiter.api.AssertionFailureBuilder.build(...:151)
+        ...
+        com.example.shop.TaxTest.couponIsSubtractedFromTheTotal(TaxTest.java:16)
+
+    Compared as printed, the innermost frame of every failed `assertEquals`
+    in the world is `AssertionFailureBuilder.build`, so any two unrelated
+    JUnit assertion failures would agree on their frame and score a match.
+    That is strictly worse than the `unknown` it replaces, because a false
+    match is evidence pointing the wrong way. The reflection and harness
+    frames below the test method are dropped for the same reason from the
+    other end.
+    """
+    if module and module.startswith(_JVM_RUNTIME_MODULES):
+        return True
+    return fq.startswith(_JVM_RUNTIME_SYMBOLS)
+
+
+def _jvm_frame(line: str) -> StackFrame | None:
+    """One JVM frame, or None when the line is not one or points nowhere."""
+    match = _JVM_FRAME.match(line)
+    if match is None:
+        # Only the JUnit console shape reaches here, and it is accepted only
+        # because the location group still has to look like `File.java:13`.
+        match = _JVM_BARE_FRAME.match(line)
+    if match is None:
+        return None
+    location = _JVM_LOC.match(match["loc"].strip())
+    if location is None:
+        return None  # "Native Method", "Unknown Source": a frame with no site
+    if _is_jvm_runtime(match["fq"], match["module"]):
+        return None
+    return StackFrame(
+        path=location["file"],
+        line=int(location["line"]),
+        symbol=_bare_symbol(match["fq"], "."),
+    )
+
+
+def extract_jvm_traces(text: str) -> list[StackTrace]:
+    """Find JVM exceptions, one trace per link in a `Caused by:` chain.
+
+    Each exception in a chain becomes its own trace, in the order the JVM
+    printed them, which puts the ROOT CAUSE last. That is deliberate and it
+    is what makes the deepest cause win: every caller here already takes the
+    last recognized trace, so the wrapper is recorded but the cause is what
+    the comparison sees. Reporting the wrapper would point at the catch
+    block that rethrew rather than at the code that broke.
+    """
+    traces: list[StackTrace] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].rstrip()
+        caused = _JVM_CAUSED_BY.match(line)
+        arrow = None if caused else _JVM_ARROW.match(line)
+        header = None if (caused or arrow) else _JVM_HEADER.match(line)
+        match = caused or arrow or header
+        if match is None:
+            index += 1
+            continue
+        # A header has to be followed by at least one frame. Without that
+        # rule any prose sentence ending in "Error" would open a trace.
+        frames: list[StackFrame] = []
+        cursor = index + 1
+        saw_frame = False
+        while cursor < len(lines):
+            candidate = lines[cursor].rstrip()
+            if _JVM_MORE.match(candidate):
+                cursor += 1
+                break
+            frame = _jvm_frame(candidate)
+            if frame is not None:
+                frames.append(frame)
+                saw_frame = True
+                cursor += 1
+                continue
+            # A line that parses as a frame but was filtered out still
+            # belongs to the trace and must not end it.
+            if _JVM_FRAME.match(candidate) or _JVM_BARE_FRAME.match(candidate):
+                saw_frame = True
+                cursor += 1
+                continue
+            break
+        if not saw_frame:
+            index += 1
+            continue
+        message = (match["message"] or "").strip()
+        error = f"{match['cls']}: {message}" if message else match["cls"]
+        traces.append(StackTrace(language="jvm", frames=frames, error=error))
+        index = cursor
+    return traces
+
+
 def _go_symbol(line: str) -> str | None:
     """The function named on the line above a Go location line."""
     created = _GO_CREATED_BY.match(line)
@@ -523,6 +702,7 @@ def extract_signals(text: str) -> Signals:
             + extract_node_traces(text)
             + extract_go_traces(text)
             + extract_rust_traces(text)
+            + extract_jvm_traces(text)
         ),
         commands=extract_commands(text),
         filenames=extract_filenames(text),

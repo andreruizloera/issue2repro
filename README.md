@@ -234,9 +234,18 @@ naming the same function is the point. A file that differs is a mismatch
 even when neither side names a function. Frames are read from pytest's
 failure body, which locates frames as `path:line:` and names the function
 only in the source it echoes above, from plain Python and Node
-tracebacks, and from Go and Rust panics. Python is the only one of those
-that prints its stack outermost first; the rest are reversed on the way in
-so the innermost frame means the same thing everywhere.
+tracebacks, from Go and Rust panics, and from JVM exceptions. Python is
+the only one of those that prints its stack outermost first; the rest are
+reversed on the way in so the innermost frame means the same thing
+everywhere.
+
+An exception type is compared on its simple name whenever only one side
+carries a package, so a reporter's `NullPointerException` matches a
+runtime's `java.lang.NullPointerException`. When both sides are qualified
+and differ, that is a real mismatch: two packages may each define a
+`ValueError`. The rule is not JVM-specific and helps Python too, where a
+reporter writes `HTTPError` for a traceback that says
+`requests.exceptions.HTTPError`.
 
 #### Go and Rust panics
 
@@ -292,6 +301,67 @@ A Rust panic pasted without `RUST_BACKTRACE=1`, which is the usual case,
 gives a file and a line but no function name at all. That compares as
 `unknown`, not as a match: the exception type and message still carry the
 verdict, and the frame abstains rather than guessing.
+
+#### JVM exceptions
+
+Unlike Go and Rust, the JVM names a real exception class, so a Java,
+Kotlin, or Scala report carries a type and a message as well as frames.
+What it does not carry is a path: a frame names `Pricing.java`, a bare
+file name with no directory at all, so the comparison rests on the class
+and method.
+
+A Java report, read against the committed `examples/javashop` project.
+This is demo part 6 and its output is checked by `demo.sh`:
+
+```console
+$ issue2repro inspect https://github.com/example/javashop/issues/1 \
+    --issue-file examples/javashop-issue-1.json --clone-url file://$PWD/javashop
+Issue: example/javashop#1: Unknown coupon code crashes checkout with a NullPointerException
+Language: unknown
+Test command: not detected
+Signals:
+  explicit commands (2):
+    $ javac -d out $(find src/main -name '*.java')
+    $ java -cp out com.example.shop.Service
+  stack trace: jvm, 2 frame(s) (java.lang.IllegalStateException: checkout failed)
+  stack trace: jvm, 2 frame(s) (java.lang.NullPointerException: Cannot invoke "java.lang.Integer.intValue()" because the return value of "java.util.Map.get(Object)" is null)
+  filenames mentioned: Service.java, Pricing.java
+
+Reproduction confidence: 60% inferred
+  [35/35] explicit repro commands: 2 command(s) found in fenced shell blocks
+  [25/25] stack trace: jvm stack trace maps to existing file(s): src/main/java/com/example/shop/Service.java, src/main/java/com/example/shop/Pricing.java
+  [ 0/20] test command: no test runner configuration found
+  [ 0/20] language detected: no Python or Node manifest at the repository root
+```
+
+Three things about the JVM changed the design:
+
+- **A `Caused by:` chain reports the deepest cause, not the outermost
+  exception.** Above, the `IllegalStateException: checkout failed` is a
+  rethrow in a catch block and the `NullPointerException` under it is the
+  bug. Each link becomes its own trace in the order the JVM printed them,
+  which puts the root cause last, and every comparison already takes the
+  last trace. Reporting the wrapper would point at the handler.
+- **Assertion and reflection frames are dropped, for the same reason Go's
+  harness frames are.** JUnit builds its error inside its own assertion
+  machinery, so a failed `assertEquals` prints six `org.junit.jupiter.api`
+  frames *above* the test method and four JDK reflection frames below it.
+  Compared as printed, the innermost frame of every failed `assertEquals`
+  in the world is `AssertionFailureBuilder.build`, so two unrelated
+  failures would score a match. Verified against real JUnit 5 output: with
+  the filter off, a coupon bug and a shipping bug compare as `match`; with
+  it on, they compare as `mismatch`.
+- **The JUnit console launcher prints frames with no `at` keyword**,
+  indented under a `=>` line rather than tab-prefixed. That shape was
+  found by running it, not assumed, and the `File.java:13` location is the
+  only thing separating it from prose, which is why a frame is taken only
+  when it names a real JVM source file and line.
+
+Failing test names are read from the JUnit console launcher's
+`Failures (N):` block. Maven Surefire and Gradle report failures in their
+own formats and are **not** read; neither was available to capture output
+from here, and writing those patterns from memory is what the rest of this
+parser deliberately avoids.
 
 Three ordering rules matter more than the comparison itself:
 
@@ -480,11 +550,23 @@ reproduction would.
   a sharper answer when the reporter pasted a traceback, never a stricter
   one when they did not.
 - Failing test names are read from pytest, `unittest`, `go test`,
-  `cargo test`, and `node --test`. Frames are read from pytest, plain
-  Python tracebacks, Node stacks, Go panics, and Rust panics. Other
-  runtimes (the JVM, Ruby, C and C++ with a symbolized backtrace) still
-  produce `unknown` frames, and the exception line and test names carry
-  the verdict there.
+  `cargo test`, `node --test`, and the JUnit console launcher. Frames are
+  read from pytest, plain Python tracebacks, Node stacks, Go panics, Rust
+  panics, and JVM exceptions. Ruby, and C and C++ with a symbolized
+  backtrace, still produce `unknown` frames. For those, be aware that the
+  exception line is only read when it sits at the start of a line with a
+  conventional type suffix, so a runtime that decorates its header may
+  produce no signature at all rather than a partial one.
+- **Only the JUnit console launcher's format is read on the JVM.** Maven
+  Surefire and Gradle print their own failure summaries and are not
+  parsed; neither was available to capture real output from, and every
+  pattern in this parser was written against output actually captured from
+  a running toolchain. A Surefire run still gets its frames and exception
+  read from the stack trace it prints, but not its test names.
+- **A JVM frame names a file, never a path.** `Pricing.java` carries no
+  directory, so mapping it onto a repository file matches on the name
+  alone. A project with two files of the same name in different packages
+  can map to the wrong one.
 - **A Go failure that is not a panic gives no frames.** A `t.Errorf`
   reports its location as `tax_test.go:7: got 107, want 110`, which is a
   failure location rather than a stack, and it is not read as a frame:

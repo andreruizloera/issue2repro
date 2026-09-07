@@ -11,9 +11,13 @@ implemented today; the README only documents what works now.
   Rust stack traces are already read out of issue text, but a Go or Rust
   repository is still not detected, gets no Dockerfile, and gets no test
   command inferred for it.
-- Recognize the stack trace formats still unread: JVM
-  `at pkg.Class.method(File.java:12)` frames, Ruby backtraces, and C or
-  C++ backtraces that were symbolized.
+- Recognize the stack trace formats still unread: Ruby backtraces, and C
+  or C++ backtraces that were symbolized. JVM frames shipped.
+- Read Maven Surefire and Gradle failure summaries for JVM test names.
+  Only the JUnit console launcher's `Failures (N):` block is read today,
+  because that is the one whose output could be captured here, and every
+  pattern in this parser is written against a real run rather than from
+  memory.
 - Read a Go `t.Errorf` location (`tax_test.go:7: got 107, want 110`) as a
   failure location. It is deliberately not read as a frame today because
   the pattern is close to ordinary prose; doing it safely probably means
@@ -51,8 +55,8 @@ rather than overwriting it. What is still open:
 - Cache the built image and the verdict, keyed by the clone's HEAD and
   the step plan, so re-verifying an issue after a fix costs one run
   instead of two.
-- JVM frames, so a Java or Kotlin project gets the frame comparison the
-  other four languages now have. Go panics and Rust panics shipped.
+- Ruby backtraces, the last mainstream runtime whose stack is unread. Go
+  panics, Rust panics, and JVM exceptions shipped.
 - Treat a target test that has been deleted or renamed as its own
   verdict, instead of folding it into "no per-test failures to compare".
 - Optional `--network none` on the container for projects whose

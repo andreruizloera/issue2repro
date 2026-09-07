@@ -19,6 +19,7 @@ import re
 
 from issue2repro.extract import (
     extract_go_traces,
+    extract_jvm_traces,
     extract_node_traces,
     extract_python_traces,
     extract_rust_traces,
@@ -71,6 +72,15 @@ _UNITTEST_FAIL = re.compile(
 _GO_FAIL = re.compile(r"^\s*--- FAIL:\s+(?P<name>\S+)\s+\([\d.]+m?s\)\s*$")
 _CARGO_FAIL = re.compile(r"^----\s+(?P<name>\S+)\s+stdout\s+----\s*$")
 _NODE_TAP_FAIL = re.compile(r"^\s*not ok \d+ - (?P<name>.+?)\s*$")
+# The JUnit console launcher's "Failures (1):" block, which it prints in
+# every --details mode:
+#   "  JUnit Jupiter:PricingTest:unknownCouponIsIgnored()"
+# The engine name is the anchor. Without it this would match any indented
+# colon-separated word ending in parentheses, which is a shape ordinary
+# prose reaches too easily.
+_JUNIT_FAIL = re.compile(
+    r"^\s+JUnit \w+:(?P<cls>[\w.$]+):(?P<name>[\w$]+)\((?P<params>[^)]*)\)\s*$"
+)
 _NODE_SPEC_FAIL = re.compile(r"^\s*[✖✗×]\s+(?P<name>.+?)\s*\([\d.]+m?s\)\s*$")
 # A TAP line can announce a skipped or planned test rather than a failure.
 _TAP_DIRECTIVE = re.compile(r"#\s*(SKIP|TODO)\b", re.IGNORECASE)
@@ -134,14 +144,16 @@ def _unittest_id(name: str, context: str | None) -> str:
 def runner_tests(text: str) -> tuple[list[str], str | None]:
     """Failing test names printed by a runner other than pytest.
 
-    unittest, go test, cargo test, and node --test each report failures in
-    their own format. One run means one runner, so the first format that
-    matches anything wins rather than merging two runners' names.
+    unittest, go test, cargo test, node --test, and the JUnit console
+    launcher each report failures in their own format. One run means one
+    runner, so the first format that matches anything wins rather than
+    merging two runners' names.
     """
     unittest_names: list[str] = []
     go_names: list[str] = []
     cargo_names: list[str] = []
     node_names: list[str] = []
+    junit_names: list[str] = []
     for raw in text.splitlines():
         line = raw.rstrip()
         found = _UNITTEST_FAIL.match(line)
@@ -156,6 +168,13 @@ def runner_tests(text: str) -> tuple[list[str], str | None]:
         if found:
             cargo_names.append(found["name"])
             continue
+        found = _JUNIT_FAIL.match(line)
+        if found:
+            # Recorded as "Class::method" so the bare method name is what
+            # _test_name() returns, matching how every other runner's id
+            # reduces for comparison.
+            junit_names.append(f"{found['cls']}::{found['name']}")
+            continue
         found = _NODE_TAP_FAIL.match(line) or _NODE_SPEC_FAIL.match(line)
         if found and not _TAP_DIRECTIVE.search(line):
             node_names.append(found["name"])
@@ -163,6 +182,7 @@ def runner_tests(text: str) -> tuple[list[str], str | None]:
         (unittest_names, "unittest failure lines"),
         (go_names, "go test failure lines"),
         (cargo_names, "cargo test failure lines"),
+        (junit_names, "JUnit failure lines"),
         (node_names, "node --test failure lines"),
     ):
         unique = list(dict.fromkeys(names))
@@ -229,8 +249,19 @@ def pytest_frames(output: str) -> list[StackFrame]:
 
 
 def native_traces(output: str) -> list[StackTrace]:
-    """Go and Rust panics found in some output, in the order they appear."""
-    return extract_go_traces(output) + extract_rust_traces(output)
+    """Go and Rust panics and JVM exceptions, in the order they appear."""
+    return extract_go_traces(output) + extract_rust_traces(output) + extract_jvm_traces(output)
+
+
+def _trace_source(language: str) -> str:
+    """How to name a trace from this language in the evidence list.
+
+    A JVM exception is not a panic, and calling it one in the output a
+    reader checks the verdict against would be a small lie of exactly the
+    kind the packet's "Reported locations" rename avoided in bugpacket.
+    """
+    noun = "exception" if language == "jvm" else "panic"
+    return f"{language} {noun}"
 
 
 def observed_frames(output: str) -> tuple[list[StackFrame], str | None]:
@@ -238,9 +269,9 @@ def observed_frames(output: str) -> tuple[list[StackFrame], str | None]:
 
     pytest's failure body first, since a pytest run is the case the tool
     generates most often; then a plain Python traceback; then a Node stack;
-    then a Go or Rust panic. Every one of those but pytest and Python prints
-    innermost first, and :func:`outermost_first` normalizes them so that
-    ``frames[-1]`` means the same thing everywhere.
+    then a Go or Rust panic or a JVM exception. Every one of those but
+    pytest and Python prints innermost first, and :func:`outermost_first`
+    normalizes them so that ``frames[-1]`` means the same thing everywhere.
     """
     frames = pytest_frames(output)
     if frames:
@@ -254,7 +285,7 @@ def observed_frames(output: str) -> tuple[list[StackFrame], str | None]:
     native = [trace for trace in native_traces(output) if trace.frames]
     if native:
         last = native[-1]
-        return outermost_first(last), f"{last.language} panic frames in the output"
+        return outermost_first(last), f"{_trace_source(last.language)} frames in the output"
     return [], None
 
 
@@ -395,13 +426,17 @@ def observed_signature(output: str, expect_type: str | None = None) -> FailureSi
         # A Rust panic announces itself as "thread 'main' panicked at
         # src/main.rs:5:14:" and puts the message on the NEXT line, so no
         # single line of the output is a recognizable failure on its own.
-        # The extractor has already paired the two; ask it rather than
+        # A JVM exception has the opposite problem: the type and message ARE
+        # on one line, but that line is prefixed by `Exception in thread
+        # "main" `, by `Caused by: `, or by JUnit's `=> `, none of which the
+        # line scanner's anchored pattern will match.
+        # The extractor has already handled both; ask it rather than
         # teaching the line scanner to carry state.
         for trace in native_traces(output):
             exc_type, message = _split_exception(trace.error or "")
             if exc_type:
                 full = (exc_type, message)
-                source = f"{trace.language} panic line in the output"
+                source = f"{_trace_source(trace.language)} line in the output"
                 if source not in signature.sources:
                     signature.sources.append(source)
 
@@ -471,6 +506,31 @@ def compare_messages(expected: str | None, observed: str | None, truncated: bool
     return "close" if overlap >= 0.6 else "different"
 
 
+def _same_exception_type(expected: str, observed: str) -> bool:
+    """Whether two exception type names name the same class.
+
+    Exact equality is the rule whenever both sides are qualified, because
+    two packages may each define a `ValueError` and those are genuinely
+    different classes. When only ONE side carries a package, the other did
+    not record one rather than recording a different one, so the comparison
+    falls back to the simple name.
+
+    The JVM is what forces this. A reporter writes `NullPointerException`
+    and the runtime prints `java.lang.NullPointerException`; requiring
+    equality would call the same class a MISMATCH, which is worse than the
+    `unknown` this feature replaces, because a mismatch is positive evidence
+    against a reproduction. The rule is written for every language, not
+    just the JVM: `requests.exceptions.HTTPError` against `HTTPError` has
+    always had the same problem in Python.
+    """
+    if expected == observed:
+        return True
+    left, right = "." in expected, "." in observed
+    if left == right:
+        return False  # both qualified and different, or both bare and different
+    return expected.rsplit(".", 1)[-1] == observed.rsplit(".", 1)[-1]
+
+
 def compare_signatures(expected: FailureSignature, observed: FailureSignature) -> SignatureMatch:
     """Compare expected against observed, component by component."""
     match = SignatureMatch()
@@ -481,7 +541,7 @@ def compare_signatures(expected: FailureSignature, observed: FailureSignature) -
     elif observed.exception_type is None:
         match.exception = "unknown"
         match.notes.append("no exception line was recognized in the run output")
-    elif expected.exception_type == observed.exception_type:
+    elif _same_exception_type(expected.exception_type, observed.exception_type):
         match.exception = "match"
     else:
         match.exception = "mismatch"
