@@ -11,3 +11,4 @@ build/
 repro/
 .DS_Store
 .env
+uv.lock
