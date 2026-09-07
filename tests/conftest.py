@@ -98,6 +98,53 @@ def write_issue(path: Path, command: str, error: str, symbol: str = "widen") -> 
 
 
 @pytest.fixture
+def unittest_repo(tmp_path: Path) -> Path:
+    """A project whose failing test runs under unittest rather than pytest.
+
+    unittest is in the standard library, so this reproduction installs
+    nothing and the end-to-end test stays offline like the others.
+    """
+    root = tmp_path / "unittestrepo"
+    root.mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "widen"\nversion = "0.1.0"\ndependencies = []\n'
+    )
+    (root / "test_widen.py").write_text(
+        "import unittest\n"
+        "\n"
+        "\n"
+        "def widen(token):\n"
+        "    raise ValueError(\"invalid literal for int() with base 10: '-'\")\n"
+        "\n"
+        "\n"
+        "class WidenTest(unittest.TestCase):\n"
+        "    def test_widen(self):\n"
+        '        widen("-")\n'
+    )
+    return root
+
+
+def write_unittest_issue(path: Path) -> Path:
+    """An issue reporting the unittest_repo failure, in unittest's own format."""
+    body = (
+        "The suite errors out on a clean checkout.\n\n"
+        "```bash\npython3 -m unittest discover\n```\n\n"
+        "```\n"
+        "ERROR: test_widen (test_widen.WidenTest.test_widen)\n"
+        "----------------------------------------------------------------------\n"
+        "Traceback (most recent call last):\n"
+        '  File "test_widen.py", line 10, in test_widen\n'
+        '    widen("-")\n'
+        '  File "test_widen.py", line 5, in widen\n'
+        "    raise ValueError(...)\n"
+        "ValueError: invalid literal for int() with base 10: '-'\n"
+        "```\n"
+    )
+    path.write_text(json.dumps({"title": "widen() errors out", "body": body, "comments": []}))
+    return path
+
+
+@pytest.fixture
 def node_repo(tmp_path: Path) -> Path:
     """A minimal Node project matching the node_issue fixture."""
     root = tmp_path / "noderepo"

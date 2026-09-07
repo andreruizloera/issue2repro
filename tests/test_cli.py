@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from issue2repro.cli import main
-from tests.conftest import write_issue
+from tests.conftest import write_issue, write_unittest_issue
 
 FIXTURES = Path(__file__).parent / "fixtures"
 URL = "https://github.com/acme/widget/issues/7"
@@ -212,6 +212,18 @@ class TestVerify:
         assert code == 1
         assert "Verification: DIFFERENT-FAILURE" in out
         assert "the issue reports KeyError, the run raised ValueError" in out
+
+    def test_a_unittest_run_is_compared_test_by_test(self, unittest_repo, tmp_path, capsys):
+        """pytest is not the only runner. The issue and the run both report
+        the failure in unittest's format, and the test names still line up."""
+        issue = write_unittest_issue(tmp_path / "issue.json")
+        code = self._verify(tmp_path, make_git_repo(unittest_repo), issue)
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "Verification: REPRODUCED" in out
+        assert "exception: match" in out
+        assert "frames:    match (widen in " in out
+        assert "tests:     match (test_widen)" in out
 
     def test_a_clean_run_does_not_reproduce(self, crash_clone_url, tmp_path, capsys):
         issue = write_issue(tmp_path / "issue.json", "python3 tools/ok.py", "ValueError: boom")

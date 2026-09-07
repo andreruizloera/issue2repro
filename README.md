@@ -194,7 +194,12 @@ the exception line and frames of a stack trace, plus test functions named
 by those frames or by any pytest node id written into the text. The
 observed one comes from the run: pytest's `E ` failure detail and plain
 tracebacks first, and pytest's short summary line last, since pytest
-truncates that one.
+truncates that one. When a run printed no pytest summary, failing tests
+are read from the other runners' formats instead: `unittest`, `go test`,
+`cargo test`, and `node --test`. Test ids from either side are reduced to
+the bare test name before they are compared, so a pytest node id, a
+unittest id, and a Rust test path all compare as the test they name
+rather than as the string their runner happened to print.
 
 Each component compares to `match`, `mismatch`, or `unknown`, and
 `unknown` is never evidence in either direction. One mismatch alongside a
@@ -412,9 +417,11 @@ reproduction would.
   verdict is then exactly what it was before frames were compared. It is
   a sharper answer when the reporter pasted a traceback, never a stricter
   one when they did not.
-- Frames are read from pytest, plain Python tracebacks, and Node stacks.
-  Other runners print their own formats, so on those projects the frame
-  comparison is `unknown` and only the exception line is compared.
+- Failing test names are read from pytest, `unittest`, `go test`,
+  `cargo test`, and `node --test`. Frames are read from pytest, plain
+  Python tracebacks, and Node stacks only, so on a Go or Rust project the
+  frame comparison is `unknown` and the exception line and the test names
+  carry the verdict.
 - **The setup/repro split is a heuristic** over the command's first word:
   a package manager asked to install, a `cd`, or an `export` is setup,
   and the last command is always treated as the reproduction. A repro

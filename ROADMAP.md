@@ -35,16 +35,16 @@ implemented today; the README only documents what works now.
 Docker image (container by default, host only with `--no-docker`),
 compares the failure it observed against the one the issue describes
 (exception type, message, the innermost stack frame, and the failing
-tests), and reports a verdict beside the inferred confidence score rather
-than overwriting it. What is still open:
+tests, which it reads from pytest, unittest, go test, cargo test, and
+node --test), and reports a verdict beside the inferred confidence score
+rather than overwriting it. What is still open:
 
 - Cache the built image and the verdict, keyed by the clone's HEAD and
   the step plan, so re-verifying an issue after a fix costs one run
   instead of two.
-- Recognize more runners' per-test output: `unittest`, `node --test`,
-  `cargo test`, and `go test` all report failing tests in formats verify
-  does not read yet, so on those projects only the exception line is
-  compared.
+- Read stack frames from the runners whose per-test output verify already
+  understands: `go test` panics, Rust panic locations, and JVM frames
+  would give those projects the frame comparison Python and Node have.
 - Treat a target test that has been deleted or renamed as its own
   verdict, instead of folding it into "no per-test failures to compare".
 - Optional `--network none` on the container for projects whose

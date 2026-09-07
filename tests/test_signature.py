@@ -13,6 +13,7 @@ from issue2repro.signature import (
     observed_frames,
     observed_signature,
     pytest_frames,
+    runner_tests,
     verdict_from_match,
 )
 
@@ -152,6 +153,15 @@ class TestExpectedSignature:
         signature = expected_signature(signals)
         assert signature.frames[-1].symbol == "applyDiscount"
 
+    def test_a_unittest_failure_pasted_into_an_issue_names_the_test(self):
+        signature = expected_signature(Signals(), UNITTEST_OUTPUT)
+        assert signature.tests == ["test_widen.WidenTest::test_widen"]
+        assert "unittest failure lines in the issue text" in signature.sources
+
+    def test_a_cargo_failure_pasted_into_an_issue_names_the_test(self):
+        text = "It panics:\n\n---- tests::divides_by_zero stdout ----\nattempt to divide\n"
+        assert expected_signature(Signals(), text).tests == ["tests::divides_by_zero"]
+
     def test_an_issue_with_no_traceback_carries_no_frames(self, vague_issue):
         assert expected_signature(extract_signals(vague_issue.full_text)).frames == []
 
@@ -227,6 +237,109 @@ class TestObservedSignature:
 
     def test_clean_output_has_no_signature(self):
         assert observed_signature("3 passed in 0.10s\n").is_empty
+
+    def test_a_unittest_run_reports_its_failing_test(self):
+        observed = observed_signature(UNITTEST_OUTPUT)
+        assert observed.tests == ["test_widen.WidenTest::test_widen"]
+        assert observed.exception_type == "ValueError"
+        assert observed.frames[-1].symbol == "widen"
+        assert "unittest failure lines" in observed.sources
+
+    def test_pytest_wins_when_both_formats_are_present(self):
+        """pytest can run unittest classes, and then both lines appear. The
+        pytest node id is the more precise of the two."""
+        observed = observed_signature(PYTEST_OUTPUT + UNITTEST_OUTPUT)
+        assert observed.tests == ["tests/test_evaluate.py::test_negative_operand"]
+
+
+UNITTEST_OUTPUT = """\
+E
+======================================================================
+ERROR: test_widen (test_widen.WidenTest.test_widen)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/repro/source/test_widen.py", line 10, in test_widen
+    widen("-")
+    ~~~~~^^^^^
+  File "/tmp/repro/source/test_widen.py", line 5, in widen
+    raise ValueError("invalid literal for int() with base 10: '-'")
+ValueError: invalid literal for int() with base 10: '-'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+FAILED (errors=1)
+"""
+
+
+class TestRunnerTests:
+    """Per-test failures from the runners that are not pytest."""
+
+    def test_unittest_on_3_11_and_later(self):
+        names, source = runner_tests(UNITTEST_OUTPUT)
+        assert names == ["test_widen.WidenTest::test_widen"]
+        assert source == "unittest failure lines"
+
+    def test_unittest_before_3_11_produces_the_same_id(self):
+        older = UNITTEST_OUTPUT.replace(
+            "test_widen (test_widen.WidenTest.test_widen)",
+            "test_widen (test_widen.WidenTest)",
+        )
+        assert runner_tests(older)[0] == ["test_widen.WidenTest::test_widen"]
+
+    def test_go_test_reports_the_test_and_its_subtest(self):
+        output = (
+            "--- FAIL: TestDivide (0.00s)\n"
+            "    --- FAIL: TestDivide/by_zero (0.00s)\n"
+            "        calc_test.go:21: expected 3, got 0\n"
+            "FAIL\n"
+            "FAIL\texample.com/calc\t0.005s\n"
+        )
+        names, source = runner_tests(output)
+        assert names == ["TestDivide", "TestDivide/by_zero"]
+        assert source == "go test failure lines"
+
+    def test_cargo_test(self):
+        output = (
+            "failures:\n"
+            "\n"
+            "---- tests::divides_by_zero stdout ----\n"
+            "thread 'tests::divides_by_zero' panicked at src/lib.rs:12:5:\n"
+            "attempt to divide by zero\n"
+            "\n"
+            "test result: FAILED. 1 passed; 1 failed; 0 ignored\n"
+        )
+        names, source = runner_tests(output)
+        assert names == ["tests::divides_by_zero"]
+        assert source == "cargo test failure lines"
+
+    def test_node_test_tap_output(self):
+        output = (
+            "TAP version 13\n"
+            "# Subtest: applies a discount\n"
+            "not ok 1 - applies a discount\n"
+            "  ---\n"
+            "  failureType: 'testCodeFailure'\n"
+            "  ...\n"
+            "ok 2 - adds an item\n"
+        )
+        names, source = runner_tests(output)
+        assert names == ["applies a discount"]
+        assert source == "node --test failure lines"
+
+    def test_a_skipped_tap_test_is_not_a_failure(self):
+        assert runner_tests("not ok 1 - applies a discount # SKIP\n")[0] == []
+
+    def test_node_test_spec_output(self):
+        names, source = runner_tests("  ✖ applies a discount (1.234ms)\n")
+        assert names == ["applies a discount"]
+        assert source == "node --test failure lines"
+
+    def test_prose_is_not_a_test_failure(self):
+        assert runner_tests("ERROR: could not install\nFAIL\nfailures:\n")[0] == []
+
+    def test_output_from_no_runner_at_all(self):
+        assert runner_tests("nothing to see here\n") == ([], None)
 
 
 class TestObservedFrames:
@@ -379,6 +492,27 @@ class TestCompareSignatures:
             exception_type="KeyError", tests=["tests/test_cart.py::test_discount[10]"]
         )
         assert compare_signatures(expected, observed).tests == "match"
+
+    def test_a_unittest_id_compares_as_the_test_it_names(self):
+        expected = expected_signature(extract_signals(UNITTEST_OUTPUT), UNITTEST_OUTPUT)
+        match = compare_signatures(expected, observed_signature(UNITTEST_OUTPUT))
+        assert match.exception == "match"
+        assert match.frames == "match"
+        assert match.tests == "match"
+        # the traceback frame named it first, so the runner id is not repeated
+        assert expected.tests == ["test_widen"]
+        assert match.matched_tests == ["test_widen"]
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_a_different_test_under_the_same_runner_is_a_mismatch(self):
+        expected = FailureSignature(
+            exception_type="ValueError", tests=["test_widen.WidenTest::test_widen"]
+        )
+        observed = observed_signature(
+            UNITTEST_OUTPUT.replace("test_widen (test_widen", "test_narrow (test_widen")
+        )
+        match = compare_signatures(expected, observed)
+        assert match.tests == "mismatch"
 
     def test_different_exception_and_test_is_a_different_failure(self):
         expected = FailureSignature(

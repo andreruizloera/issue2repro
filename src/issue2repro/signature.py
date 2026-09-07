@@ -38,6 +38,25 @@ _NODE_ID = re.compile(r"(?P<nodeid>[\w./-]+\.py::[\w\[\]:.\-]+)")
 
 _TEST_NAME = re.compile(r"^test[\w]*$")
 
+# Per-test failure lines from the runners that are not pytest. Each one is
+# anchored hard enough that ordinary prose does not trip it: unittest wants
+# a method whose name starts with "test", go and cargo want their own
+# decorations, and node's TAP output wants a numbered "not ok".
+#   unittest:  "ERROR: test_widen (test_widen.WidenTest.test_widen)"
+#   go test:   "--- FAIL: TestDivide/by_zero (0.00s)"
+#   cargo:     "---- tests::divides_by_zero stdout ----"
+#   node TAP:  "not ok 1 - applies a discount"
+#   node spec: "  x applies a discount (1.2ms)"
+_UNITTEST_FAIL = re.compile(
+    r"^(?:FAIL|ERROR):\s+(?P<name>test\w*)(?:\s+\((?P<context>[\w.]+)\))?\s*$"
+)
+_GO_FAIL = re.compile(r"^\s*--- FAIL:\s+(?P<name>\S+)\s+\([\d.]+m?s\)\s*$")
+_CARGO_FAIL = re.compile(r"^----\s+(?P<name>\S+)\s+stdout\s+----\s*$")
+_NODE_TAP_FAIL = re.compile(r"^\s*not ok \d+ - (?P<name>.+?)\s*$")
+_NODE_SPEC_FAIL = re.compile(r"^\s*[✖✗×]\s+(?P<name>.+?)\s*\([\d.]+m?s\)\s*$")
+# A TAP line can announce a skipped or planned test rather than a failure.
+_TAP_DIRECTIVE = re.compile(r"#\s*(SKIP|TODO)\b", re.IGNORECASE)
+
 # pytest prints no "File ..., line N, in fn" frames. It locates each frame on
 # a line of its own at the end of that frame's block:
 #   "tests/test_evaluate.py:13:"            (the default long traceback)
@@ -70,6 +89,63 @@ def _test_name(nodeid: str) -> str:
     """The bare test function name from a node id, parametrization stripped."""
     tail = nodeid.rsplit("::", 1)[-1]
     return tail.split("[", 1)[0]
+
+
+def _unittest_id(name: str, context: str | None) -> str:
+    """A unittest failure header as one id: 'test_x.Case::test_method'.
+
+    unittest names a test twice, and differently by version: 3.11 and later
+    print "test_widen (test_widen.WidenTest.test_widen)" where 3.10 printed
+    "test_widen (test_widen.WidenTest)". Normalizing both to one id with
+    "::" before the method means every runner's ids reduce to a bare test
+    name under the same rule, and the same line in an issue and in a run
+    produces the same string.
+    """
+    if not context:
+        return name
+    if context.endswith("." + name):
+        context = context[: -len(name) - 1]
+    return f"{context}::{name}" if context else name
+
+
+def runner_tests(text: str) -> tuple[list[str], str | None]:
+    """Failing test names printed by a runner other than pytest.
+
+    unittest, go test, cargo test, and node --test each report failures in
+    their own format. One run means one runner, so the first format that
+    matches anything wins rather than merging two runners' names.
+    """
+    unittest_names: list[str] = []
+    go_names: list[str] = []
+    cargo_names: list[str] = []
+    node_names: list[str] = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        found = _UNITTEST_FAIL.match(line)
+        if found:
+            unittest_names.append(_unittest_id(found["name"], found["context"]))
+            continue
+        found = _GO_FAIL.match(line)
+        if found:
+            go_names.append(found["name"])
+            continue
+        found = _CARGO_FAIL.match(line)
+        if found:
+            cargo_names.append(found["name"])
+            continue
+        found = _NODE_TAP_FAIL.match(line) or _NODE_SPEC_FAIL.match(line)
+        if found and not _TAP_DIRECTIVE.search(line):
+            node_names.append(found["name"])
+    for names, source in (
+        (unittest_names, "unittest failure lines"),
+        (go_names, "go test failure lines"),
+        (cargo_names, "cargo test failure lines"),
+        (node_names, "node --test failure lines"),
+    ):
+        unique = list(dict.fromkeys(names))
+        if unique:
+            return unique, source
+    return [], None
 
 
 def _basename(path: str) -> str:
@@ -230,6 +306,17 @@ def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
             if "pytest node id in the issue text" not in signature.sources:
                 signature.sources.append("pytest node id in the issue text")
 
+    runner_names, runner_source = runner_tests(text)
+    known = {_test_name(name) for name in tests}
+    for name in runner_names:
+        # A traceback frame and the runner's own failure line name the same
+        # test twice. Keep it once, under the name that was found first.
+        if _test_name(name) not in known:
+            known.add(_test_name(name))
+            tests.append(name)
+            if runner_source and f"{runner_source} in the issue text" not in signature.sources:
+                signature.sources.append(f"{runner_source} in the issue text")
+
     signature.tests = tests
     return signature
 
@@ -240,7 +327,9 @@ def observed_signature(output: str, expect_type: str | None = None) -> FailureSi
     Exception text is taken from the most specific source available, in
     order: pytest's "E   " echo and plain tracebacks (both untruncated),
     then pytest's short-summary line, which pytest may have truncated.
-    Frames come from :func:`observed_frames`.
+    Frames come from :func:`observed_frames`. Failing tests come from
+    pytest's short summary, and when a run printed none, from the other
+    runners' formats through :func:`runner_tests`.
 
     ``expect_type`` is a targeted fallback. The general matcher only
     recognizes exception names with a conventional suffix, so a project's
@@ -287,6 +376,10 @@ def observed_signature(output: str, expect_type: str | None = None) -> FailureSi
                 truncated_detail = (exc_type, message)
     if tests:
         signature.sources.append("pytest short summary")
+    else:
+        tests, runner_source = runner_tests(output)
+        if runner_source:
+            signature.sources.append(runner_source)
 
     if full is not None:
         signature.exception_type, signature.exception_message = full
@@ -383,7 +476,10 @@ def compare_signatures(expected: FailureSignature, observed: FailureSignature) -
         match.notes.append("the run reported no per-test failures to compare against")
     else:
         observed_names = {_test_name(nodeid) for nodeid in observed.tests}
-        matched = [name for name in expected.tests if name in observed_names]
+        # Both sides are reduced to the bare test name, so a pytest node id,
+        # a unittest id, and a cargo path all compare as the function they
+        # name rather than as the string their runner happened to print.
+        matched = [name for name in expected.tests if _test_name(name) in observed_names]
         match.matched_tests = matched
         if matched:
             match.tests = "match"
