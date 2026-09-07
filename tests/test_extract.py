@@ -40,6 +40,22 @@ class TestPythonTraces:
     def test_no_trace_in_prose(self, vague_issue):
         assert extract_python_traces(vague_issue.full_text) == []
 
+    def test_anchor_lines_do_not_cut_the_trace_short(self):
+        """Python 3.11 and later underline the failing expression with a
+        "~~~^^^" line. Every frame after the first one has to survive it."""
+        text = (
+            "Traceback (most recent call last):\n"
+            '  File "/tmp/repro.py", line 6, in <module>\n'
+            '    widen("-")\n'
+            "    ~~~~~^^^^^\n"
+            '  File "/tmp/repro.py", line 2, in widen\n'
+            "    raise ValueError(\"invalid literal for int() with base 10: '-'\")\n"
+            "ValueError: invalid literal for int() with base 10: '-'\n"
+        )
+        trace = extract_python_traces(text)[0]
+        assert [f.symbol for f in trace.frames] == ["<module>", "widen"]
+        assert trace.error == "ValueError: invalid literal for int() with base 10: '-'"
+
 
 class TestNodeTraces:
     def test_frames_error_and_internal_paths(self, node_issue):

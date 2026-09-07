@@ -59,10 +59,12 @@ FAILED tests/test_evaluate.py::test_negative_operand - ValueError: invalid li...
 ========================= 1 failed, 2 passed in 0.09s ==========================
 """
 
+# Verbatim from Python 3.13, anchor line included.
 PLAIN_TRACEBACK = """\
 Traceback (most recent call last):
   File "/tmp/repro/source/tools/repro.py", line 5, in <module>
     widen("-")
+    ~~~~~^^^^^
   File "/tmp/repro/source/tools/repro.py", line 2, in widen
     raise ValueError("invalid literal for int() with base 10: '-'")
 ValueError: invalid literal for int() with base 10: '-'

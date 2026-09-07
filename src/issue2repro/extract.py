@@ -111,15 +111,17 @@ def extract_python_traces(text: str) -> list[StackTrace]:
                     )
                 )
                 i += 1
-                # skip the source-line echo under a frame, if present
-                if (
+                # Skip whatever the interpreter echoed under the frame: the
+                # source line, and on 3.11 and later the "~~~^^^" anchor
+                # under it. Anything indented that is neither another frame
+                # nor the exception line belongs to this frame.
+                while (
                     i < len(lines)
                     and lines[i].startswith((" ", "\t"))
                     and not _PY_FRAME.match(lines[i])
+                    and not _PY_ERROR.match(lines[i].strip())
                 ):
-                    err = _PY_ERROR.match(lines[i].strip())
-                    if not err:
-                        i += 1
+                    i += 1
                 continue
             err = _PY_ERROR.match(lines[i].strip())
             if err:
