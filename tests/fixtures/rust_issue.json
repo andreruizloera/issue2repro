@@ -1,0 +1,5 @@
+{
+  "title": "discount panics on an unknown coupon code",
+  "body": "`discount` divides by the coupon rate without checking it is non-zero.\n\n```bash\ncargo run\n```\n\n```\nthread 'main' (96845654) panicked at src/main.rs:5:14:\nattempt to divide by zero\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n```\n",
+  "comments": []
+}

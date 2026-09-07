@@ -1,0 +1,5 @@
+{
+  "title": "Discount panics when the coupon code is unknown",
+  "body": "`Discount` should leave the amount alone when the coupon code is not in\nthe rates map. Instead it panics.\n\n```bash\ngo run ./cmd/shop\n```\n\n```\npanic: runtime error: integer divide by zero\n\ngoroutine 1 [running]:\nexample.com/shop/pricing.applyRate(...)\n\t/home/dana/src/shop/pricing/pricing.go:10\nexample.com/shop/pricing.Discount(...)\n\t/home/dana/src/shop/pricing/pricing.go:6\nmain.main()\n\t/home/dana/src/shop/cmd/shop/main.go:11 +0x124\nexit status 2\n```\n\n`go test ./pricing/` fails the same way in `TestDiscountUnknownCode`.\n",
+  "comments": []
+}

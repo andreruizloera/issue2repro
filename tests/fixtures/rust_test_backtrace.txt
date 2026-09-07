@@ -1,0 +1,19 @@
+---- tests::discounts_unknown_code stdout ----
+
+thread 'tests::discounts_unknown_code' (96845405) panicked at src/main.rs:5:14:
+attempt to divide by zero
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+   1: core::panicking::panic_fmt
+   2: core::panicking::panic_const::panic_const_div_by_zero
+   3: shop::apply_rate
+             at ./src/main.rs:5:14
+   4: shop::discount
+             at ./src/main.rs:10:5
+   5: shop::tests::discounts_unknown_code
+             at ./src/main.rs:27:20
+   6: shop::tests::discounts_unknown_code::{closure#0}
+             at ./src/main.rs:24:32
+   7: <shop::tests::discounts_unknown_code::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /opt/homebrew/Cellar/rust/1.98.0/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.

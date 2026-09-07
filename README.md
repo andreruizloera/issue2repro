@@ -34,7 +34,8 @@ issue2repro verify https://github.com/OWNER/REPO/issues/N    # did it reproduce?
 Real output from `./demo.sh`, which runs the whole pipeline against the
 fixture project in `examples/tinycalc` and the committed bug reports in
 `examples/tinycalc-issue-*.json` (cloned over `file://`, issues read from
-disk):
+disk). A fifth part reads a Go panic against `examples/goshop`, which is
+[further down](#go-and-rust-panics):
 
 ```
 == issue2repro build ==
@@ -232,9 +233,65 @@ A frame whose function is unnamed on either side is `unknown`, not a match:
 naming the same function is the point. A file that differs is a mismatch
 even when neither side names a function. Frames are read from pytest's
 failure body, which locates frames as `path:line:` and names the function
-only in the source it echoes above, and from plain Python and Node
-tracebacks; Node prints its stack innermost first and is reversed on the
-way in so the innermost frame means the same thing everywhere.
+only in the source it echoes above, from plain Python and Node
+tracebacks, and from Go and Rust panics. Python is the only one of those
+that prints its stack outermost first; the rest are reversed on the way in
+so the innermost frame means the same thing everywhere.
+
+#### Go and Rust panics
+
+Neither language has an exception type to name, so both are recorded under
+the type `panic` (or `fatal error` for Go's unrecoverable kind) and
+everything that distinguishes one panic from another lives in the message.
+
+A Go report, read against the committed `examples/goshop` project. This is
+demo part 5 and its output is checked by `demo.sh`:
+
+```console
+$ issue2repro inspect https://github.com/example/goshop/issues/1 \
+    --issue-file examples/goshop-issue-1.json --clone-url file://$PWD/goshop
+Issue: example/goshop#1: Discount panics when the coupon code is unknown
+Language: unknown
+Test command: not detected
+Signals:
+  explicit commands (1):
+    $ go run ./cmd/shop
+  stack trace: go, 3 frame(s) (panic: runtime error: integer divide by zero)
+
+Reproduction confidence: 60% inferred
+  [35/35] explicit repro commands: 1 command(s) found in fenced shell blocks
+  [25/25] stack trace: go stack trace maps to existing file(s): pricing/pricing.go, cmd/shop/main.go
+  [ 0/20] test command: no test runner configuration found
+  [ 0/20] language detected: no Python or Node manifest at the repository root
+```
+
+Both halves of that are the point. The panic is read and its three frames
+are mapped onto files that exist in the repository, even though the
+reporter's trace names `/home/dana/src/shop/...` and the clone is
+somewhere else entirely. The language and the test command are reported as
+not detected, because building an environment for a Go project is not
+implemented and saying so is better than guessing.
+
+Two details are worth stating because they change what a match means:
+
+- **Runtime and test-harness frames are dropped.** A `go test` panic prints
+  three frames belonging to the harness and the runtime (`testing.tRunner.func1.2`,
+  `testing.tRunner.func1`, `panic`) *below* the code that actually failed,
+  and Rust's backtrace opens with three panic-machinery frames and can end
+  in `rustlib`. Compared as printed, the innermost frame of every Go test
+  panic ever written is the same harness function, so any two unrelated
+  failures would agree on it. Dropping them is what makes the comparison
+  mean anything.
+- **The package or module path is dropped from the function name**, the
+  same way the directory prefix is dropped from the file. `example.com/shop/pricing.applyRate`
+  compares as `applyRate` and `shop::tests::checkout::{closure#0}` as
+  `checkout`, because the reporter's module path and the reproduction's
+  need not agree while the function that failed is the same function.
+
+A Rust panic pasted without `RUST_BACKTRACE=1`, which is the usual case,
+gives a file and a line but no function name at all. That compares as
+`unknown`, not as a match: the exception type and message still carry the
+verdict, and the frame abstains rather than guessing.
 
 Three ordering rules matter more than the comparison itself:
 
@@ -395,7 +452,10 @@ reproduction would.
 
 ## Limitations
 
-- Python and Node only, for now (see ROADMAP.md for planned languages).
+- **Workspace generation is Python and Node only**, for now (see
+  ROADMAP.md). A Go or Rust repository is not detected, gets no
+  Dockerfile, and gets no test command inferred, even though Go and Rust
+  panics in the issue text are read and compared.
 - The Dockerfile is best effort: right base image and manifest install
   steps. It will not conjure system packages, databases, or the exact
   interpreter version the reporter had. A project that needs any of those
@@ -421,9 +481,20 @@ reproduction would.
   one when they did not.
 - Failing test names are read from pytest, `unittest`, `go test`,
   `cargo test`, and `node --test`. Frames are read from pytest, plain
-  Python tracebacks, and Node stacks only, so on a Go or Rust project the
-  frame comparison is `unknown` and the exception line and the test names
-  carry the verdict.
+  Python tracebacks, Node stacks, Go panics, and Rust panics. Other
+  runtimes (the JVM, Ruby, C and C++ with a symbolized backtrace) still
+  produce `unknown` frames, and the exception line and test names carry
+  the verdict there.
+- **A Go failure that is not a panic gives no frames.** A `t.Errorf`
+  reports its location as `tax_test.go:7: got 107, want 110`, which is a
+  failure location rather than a stack, and it is not read as a frame:
+  the pattern is close enough to ordinary prose that matching it would
+  cost more in false frames than it returns. The test name is still read
+  from the `--- FAIL:` line, so those runs compare on tests instead.
+- **A Rust panic without a backtrace names no function.** `RUST_BACKTRACE=1`
+  is off by default, so most pasted Rust panics carry a file and a line
+  and nothing else. That is `unknown` on the frame component, not a
+  match.
 - **The setup/repro split is a heuristic** over the command's first word:
   a package manager asked to install, a `cd`, or an `export` is setup,
   and the last command is always treated as the reproduction. A repro

@@ -56,7 +56,7 @@ class StackFrame:
 class StackTrace:
     """A recognized stack trace from the issue text."""
 
-    language: str  # "python" or "node"
+    language: str  # "python", "node", "go", or "rust"
     frames: list[StackFrame]
     error: str | None = None
 
@@ -130,9 +130,10 @@ class FailureSignature:
     a run actually produced (observed).
 
     ``frames`` is always stored the way Python prints a traceback, outermost
-    first, so ``frames[-1]`` is the frame that raised. Node prints its stack
-    the other way round and is reversed on the way in, so the last element
-    means the same thing for every language.
+    first, so ``frames[-1]`` is the frame that raised. Node, Go, and Rust all
+    print their stacks the other way round and are reversed on the way in by
+    :func:`issue2repro.extract.outermost_first`, so the last element means
+    the same thing for every language.
     """
 
     exception_type: str | None = None

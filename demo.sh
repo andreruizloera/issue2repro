@@ -180,6 +180,26 @@ check "$WORK/v4.txt" "frames:    mismatch"
 check "$WORK/v4.txt" "tests:     match (test_negative_operand)"
 check "$WORK/v4.txt" "note: the issue's traceback raises in tokenize (src/tinycalc/evaluate.py), the run raised in evaluate (src/tinycalc/evaluate.py)"
 
+# A Go bug report. The reproduction pipeline itself is Python and Node only,
+# so this part deliberately shows BOTH halves of the truth: the Go panic is
+# read and its frames are mapped onto real files in the repository, while the
+# language and test command are honestly reported as not detected.
+cp -R "$ROOT/examples/goshop" "$WORK/goshop"
+git -C "$WORK/goshop" init --quiet
+git -C "$WORK/goshop" add --all
+git -C "$WORK/goshop" -c user.name=fixture -c user.email=fixture@example.invalid \
+    commit --quiet --message "goshop demo fixture"
+
+echo "== issue2repro inspect: a Go panic, read from the issue =="
+"${I2R[@]}" inspect "https://github.com/example/goshop/issues/1" \
+    --issue-file "$ROOT/examples/goshop-issue-1.json" \
+    --clone-url "file://$WORK/goshop" | tee "$WORK/goshop.txt"
+
+check "$WORK/goshop.txt" "  stack trace: go, 3 frame(s) (panic: runtime error: integer divide by zero)"
+check "$WORK/goshop.txt" "[25/25] stack trace: go stack trace maps to existing file(s): pricing/pricing.go, cmd/shop/main.go"
+check "$WORK/goshop.txt" "Language: unknown"
+check "$WORK/goshop.txt" "Reproduction confidence: 60% inferred"
+
 echo
 if [ "$FAILURES" -ne 0 ]; then
     echo "demo.sh: $FAILURES check(s) failed. The README and the tool disagree." >&2

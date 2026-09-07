@@ -17,14 +17,32 @@ from __future__ import annotations
 
 import re
 
-from issue2repro.extract import extract_node_traces, extract_python_traces
-from issue2repro.models import FailureSignature, Signals, SignatureMatch, StackFrame
+from issue2repro.extract import (
+    extract_go_traces,
+    extract_node_traces,
+    extract_python_traces,
+    extract_rust_traces,
+    outermost_first,
+)
+from issue2repro.models import (
+    FailureSignature,
+    Signals,
+    SignatureMatch,
+    StackFrame,
+    StackTrace,
+)
 
 # An exception line, as printed by Python, Node, or pytest's "E   " echo.
 # The type name must end in a recognizable suffix, which keeps ordinary
 # prose with a colon in it from being read as an exception.
 _EXC_SUFFIXES = r"(?:Error|Exception|Warning|Interrupt|Exit|StopIteration|Failure|Failed)"
 _EXC_LINE = re.compile(rf"^(?P<type>[A-Za-z_][\w.]*{_EXC_SUFFIXES})(?::\s*(?P<message>.*))?$")
+
+# Go and Rust have no exception type to name. Both call the failure a panic,
+# so "panic" is what this tool records as the type, and everything that
+# distinguishes one panic from another lives in the message. A colon and a
+# message are required, so the bare word in prose is not read as a failure.
+_PANIC_LINE = re.compile(r"^(?P<type>panic|fatal error):\s*(?P<message>\S.*)$")
 
 # pytest's short summary: "FAILED tests/test_x.py::test_y - ValueError: boom"
 _PYTEST_SUMMARY = re.compile(
@@ -77,8 +95,13 @@ _WHITESPACE = re.compile(r"\s+")
 
 
 def _split_exception(text: str) -> tuple[str | None, str | None]:
-    """Split 'ValueError: boom' into ('ValueError', 'boom')."""
-    match = _EXC_LINE.match(text.strip())
+    """Split 'ValueError: boom' into ('ValueError', 'boom').
+
+    Also splits a Go or Rust panic line, which names no type of its own and
+    is recorded under the type "panic" or "fatal error".
+    """
+    stripped = text.strip()
+    match = _EXC_LINE.match(stripped) or _PANIC_LINE.match(stripped)
     if not match:
         return None, None
     message = match["message"]
@@ -205,13 +228,19 @@ def pytest_frames(output: str) -> list[StackFrame]:
     return frames
 
 
+def native_traces(output: str) -> list[StackTrace]:
+    """Go and Rust panics found in some output, in the order they appear."""
+    return extract_go_traces(output) + extract_rust_traces(output)
+
+
 def observed_frames(output: str) -> tuple[list[StackFrame], str | None]:
     """The frames this run's output shows, with the source that produced them.
 
     pytest's failure body first, since a pytest run is the case the tool
-    generates most often; then a plain Python traceback; then a Node stack,
-    which prints innermost first and is reversed so that ``frames[-1]`` means
-    the same thing everywhere.
+    generates most often; then a plain Python traceback; then a Node stack;
+    then a Go or Rust panic. Every one of those but pytest and Python prints
+    innermost first, and :func:`outermost_first` normalizes them so that
+    ``frames[-1]`` means the same thing everywhere.
     """
     frames = pytest_frames(output)
     if frames:
@@ -221,7 +250,11 @@ def observed_frames(output: str) -> tuple[list[StackFrame], str | None]:
         return python[-1].frames, "traceback frames in the output"
     node = [trace for trace in extract_node_traces(output) if trace.frames]
     if node:
-        return list(reversed(node[-1].frames)), "node stack frames in the output"
+        return outermost_first(node[-1]), "node stack frames in the output"
+    native = [trace for trace in native_traces(output) if trace.frames]
+    if native:
+        last = native[-1]
+        return outermost_first(last), f"{last.language} panic frames in the output"
     return [], None
 
 
@@ -282,9 +315,7 @@ def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
         if exc_type:
             signature.exception_type = exc_type
             signature.exception_message = message
-            signature.frames = (
-                list(reversed(trace.frames)) if trace.language == "node" else list(trace.frames)
-            )
+            signature.frames = outermost_first(trace)
             signature.sources.append(f"{trace.language} stack trace in the issue")
             if trace.frames and "stack frames in the issue" not in signature.sources:
                 signature.sources.append("stack frames in the issue")
@@ -359,6 +390,20 @@ def observed_signature(output: str, expect_type: str | None = None) -> FailureSi
                     signature.sources.append("pytest failure detail")
             elif "exception line in the output" not in signature.sources:
                 signature.sources.append("exception line in the output")
+
+    if full is None:
+        # A Rust panic announces itself as "thread 'main' panicked at
+        # src/main.rs:5:14:" and puts the message on the NEXT line, so no
+        # single line of the output is a recognizable failure on its own.
+        # The extractor has already paired the two; ask it rather than
+        # teaching the line scanner to carry state.
+        for trace in native_traces(output):
+            exc_type, message = _split_exception(trace.error or "")
+            if exc_type:
+                full = (exc_type, message)
+                source = f"{trace.language} panic line in the output"
+                if source not in signature.sources:
+                    signature.sources.append(source)
 
     tests: list[str] = []
     truncated_detail: tuple[str, str | None] | None = None

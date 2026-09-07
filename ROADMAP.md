@@ -6,9 +6,18 @@ implemented today; the README only documents what works now.
 ## More ecosystems
 
 - Rust (Cargo.toml, `cargo test`), Go (go.mod, `go test ./...`), Ruby
-  (Gemfile, `rake test` / `rspec`), Java (pom.xml / build.gradle).
-- Recognize their stack trace formats in issue text (Rust panics, Go
-  goroutine dumps, JVM `at pkg.Class.method(File.java:12)` frames).
+  (Gemfile, `rake test` / `rspec`), Java (pom.xml / build.gradle). This
+  is about DETECTING the project and building its environment: Go and
+  Rust stack traces are already read out of issue text, but a Go or Rust
+  repository is still not detected, gets no Dockerfile, and gets no test
+  command inferred for it.
+- Recognize the stack trace formats still unread: JVM
+  `at pkg.Class.method(File.java:12)` frames, Ruby backtraces, and C or
+  C++ backtraces that were symbolized.
+- Read a Go `t.Errorf` location (`tax_test.go:7: got 107, want 110`) as a
+  failure location. It is deliberately not read as a frame today because
+  the pattern is close to ordinary prose; doing it safely probably means
+  requiring the `--- FAIL:` block it sits under.
 
 ## Smarter environment inference
 
@@ -42,9 +51,8 @@ rather than overwriting it. What is still open:
 - Cache the built image and the verdict, keyed by the clone's HEAD and
   the step plan, so re-verifying an issue after a fix costs one run
   instead of two.
-- Read stack frames from the runners whose per-test output verify already
-  understands: `go test` panics, Rust panic locations, and JVM frames
-  would give those projects the frame comparison Python and Node have.
+- JVM frames, so a Java or Kotlin project gets the frame comparison the
+  other four languages now have. Go panics and Rust panics shipped.
 - Treat a target test that has been deleted or renamed as its own
   verdict, instead of folding it into "no per-test failures to compare".
 - Optional `--network none` on the container for projects whose

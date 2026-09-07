@@ -1,0 +1,27 @@
+?   	example.com/shop/cmd/shop	[no test files]
+--- FAIL: TestDiscountUnknownCode (0.00s)
+panic: runtime error: integer divide by zero [recovered, repanicked]
+
+goroutine 18 [running]:
+testing.tRunner.func1.2({0x100a624e8, 0x100a99140})
+	/opt/homebrew/Cellar/go/1.27.1/libexec/src/testing/testing.go:2123 +0x1a0
+testing.tRunner.func1()
+	/opt/homebrew/Cellar/go/1.27.1/libexec/src/testing/testing.go:2126 +0x2c8
+panic({0x100a624e8?, 0x100a99140?})
+	/opt/homebrew/Cellar/go/1.27.1/libexec/src/runtime/panic.go:859 +0x120
+example.com/shop/pricing.applyRate(...)
+	/tmp/gofail/pricing/pricing.go:10
+example.com/shop/pricing.Discount(...)
+	/tmp/gofail/pricing/pricing.go:6
+example.com/shop/pricing.TestDiscountUnknownCode(0x5649370d8248)
+	/tmp/gofail/pricing/pricing_test.go:7 +0x138
+testing.tRunner(0x5649370d8248, 0x100a7f3e8)
+	/opt/homebrew/Cellar/go/1.27.1/libexec/src/testing/testing.go:2193 +0xc4
+created by testing.(*T).Run in goroutine 1
+	/opt/homebrew/Cellar/go/1.27.1/libexec/src/testing/testing.go:2258 +0x3b8
+FAIL	example.com/shop/pricing	0.652s
+--- FAIL: TestWithTax (0.00s)
+    tax_test.go:7: WithTax(100) = 107, want 110
+FAIL
+FAIL	example.com/shop/tax	0.491s
+FAIL

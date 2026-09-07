@@ -35,6 +35,45 @@ def vague_issue() -> Issue:
 
 
 @pytest.fixture
+def go_issue() -> Issue:
+    """A Go panic, captured from a real `go run` under go1.27.1."""
+    return load_fixture("go_issue.json")
+
+
+@pytest.fixture
+def rust_issue() -> Issue:
+    """A Rust panic, captured from a real `cargo run` under rustc 1.98.0."""
+    return load_fixture("rust_issue.json")
+
+
+def load_output(name: str) -> str:
+    """Raw runner output, kept verbatim in a file rather than inlined.
+
+    These carry lines well over the line-length limit and matter only if
+    they stay byte-for-byte what the toolchain printed, which is an
+    argument against retyping them into a Python literal in two modules.
+    """
+    return (FIXTURES / name).read_text()
+
+
+@pytest.fixture
+def go_test_panic() -> str:
+    """Real `go test ./...` output under go1.27.1.
+
+    Carries both kinds of Go failure at once: a panic with a goroutine
+    stack, and a `t.Errorf` in another package whose location line is
+    deliberately not read as a frame.
+    """
+    return load_output("go_test_panic.txt")
+
+
+@pytest.fixture
+def rust_test_backtrace() -> str:
+    """Real `RUST_BACKTRACE=1 cargo test` output under rustc 1.98.0."""
+    return load_output("rust_test_backtrace.txt")
+
+
+@pytest.fixture
 def python_repo(tmp_path: Path) -> Path:
     """A minimal Python project matching the python_issue fixture."""
     root = tmp_path / "pyrepo"

@@ -644,3 +644,93 @@ class TestCompareSignatures:
         match = compare_signatures(expected, observed)
         assert match.message == "close"
         assert any("truncated" in note for note in match.notes)
+
+
+class TestNativePanicSignatures:
+    """Go and Rust, end to end: issue text in, verdict out.
+
+    Every panic in this class was captured from a real toolchain run
+    (go1.27.1, rustc 1.98.0) rather than written from memory. Before this
+    worked, a Go or Rust report produced an EMPTY expected signature and the
+    verdict was `unknown`: the tool had nothing checkable at all.
+    """
+
+    def test_go_report_against_a_go_test_run(self, go_issue, go_test_panic):
+        text = go_issue.full_text
+        expected = expected_signature(extract_signals(text), text)
+        observed = observed_signature(go_test_panic, expected.exception_type)
+        match = compare_signatures(expected, observed)
+        assert expected.exception_type == "panic"
+        assert expected.exception_message == "runtime error: integer divide by zero"
+        assert match.exception == "match"
+        # The reporter ran the binary from /home/dana and the reproduction ran
+        # the tests from /tmp. Only the function and the basename are compared.
+        assert match.frames == "match"
+        assert match.matched_frame.startswith("applyRate ")
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_same_panic_in_a_different_function_is_a_mismatch(self, go_test_panic):
+        """The case the panic line alone cannot tell apart, and the reason
+        the frame comparison is worth having for these languages."""
+        text = (
+            "```\n"
+            "panic: runtime error: integer divide by zero\n"
+            "\n"
+            "goroutine 1 [running]:\n"
+            "example.com/shop/tax.perUnit(...)\n"
+            "\t/home/dana/src/shop/tax/tax.go:22\n"
+            "main.main()\n"
+            "\t/home/dana/src/shop/cmd/shop/main.go:11 +0x124\n"
+            "```\n"
+        )
+        expected = expected_signature(extract_signals(text), text)
+        observed = observed_signature(go_test_panic, expected.exception_type)
+        match = compare_signatures(expected, observed)
+        assert match.exception == "match"
+        assert match.frames == "mismatch"
+        assert verdict_from_match(match) == "partial"
+        assert any("perUnit" in note and "applyRate" in note for note in match.notes)
+
+    def test_rust_report_with_a_backtrace_matches_on_the_function(self, rust_test_backtrace):
+        text = "```\n" + rust_test_backtrace + "```\n"
+        expected = expected_signature(extract_signals(text), text)
+        observed = observed_signature(rust_test_backtrace, expected.exception_type)
+        match = compare_signatures(expected, observed)
+        assert expected.exception_type == "panic"
+        assert match.frames == "match"
+        assert match.matched_frame.startswith("apply_rate ")
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_rust_report_without_a_backtrace_is_unknown_not_a_match(
+        self, rust_issue, rust_test_backtrace
+    ):
+        """A bare panic header names a file and a line but no function, and
+        naming the same function is the point. `unknown` is the honest answer
+        and it is not evidence in either direction."""
+        text = rust_issue.full_text
+        expected = expected_signature(extract_signals(text), text)
+        observed = observed_signature(rust_test_backtrace, expected.exception_type)
+        match = compare_signatures(expected, observed)
+        assert expected.frames[-1].symbol is None
+        assert match.exception == "match"
+        assert match.message == "exact"
+        assert match.frames == "unknown"
+
+    def test_rust_panic_line_is_read_across_two_lines(self, rust_test_backtrace):
+        """Rust puts the location on the panic line and the message on the
+        next one, so no single line of the output is a failure on its own."""
+        observed = observed_signature(rust_test_backtrace)
+        assert observed.exception_type == "panic"
+        assert observed.exception_message == "attempt to divide by zero"
+        assert "rust panic line in the output" in observed.sources
+
+    def test_observed_frames_names_the_language_that_produced_them(self, go_test_panic):
+        frames, source = observed_frames(go_test_panic)
+        assert source == "go panic frames in the output"
+        assert frames[-1].symbol == "applyRate"
+
+    def test_a_go_panic_does_not_outrank_a_pytest_failure(self, go_test_panic):
+        """Ordering is unchanged: pytest's own body still wins when both are
+        present, which is the case a polyglot repository produces."""
+        frames, source = observed_frames(PYTEST_OUTPUT + "\n" + go_test_panic)
+        assert source == "pytest traceback frames"

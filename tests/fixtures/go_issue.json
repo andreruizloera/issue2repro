@@ -1,0 +1,5 @@
+{
+  "title": "Discount panics with an unknown coupon code",
+  "body": "Calling `Discount` with a code that is not in the rates map crashes\ninstead of leaving the amount alone.\n\nSteps:\n\n```bash\ngo run ./cmd/shop\n```\n\nOutput:\n\n```\npanic: runtime error: integer divide by zero\n\ngoroutine 1 [running]:\nexample.com/shop/pricing.applyRate(...)\n\t/home/dana/src/shop/pricing/pricing.go:10\nexample.com/shop/pricing.Discount(...)\n\t/home/dana/src/shop/pricing/pricing.go:6\nmain.main()\n\t/home/dana/src/shop/cmd/shop/main.go:11 +0x124\nexit status 2\n```\n",
+  "comments": []
+}
