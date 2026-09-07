@@ -191,7 +191,8 @@ it were "no" is the same rubber stamp as one that reports it as "yes".
 The signature is an exception type, its message, the frame it was raised
 in, and the failing test names. The expected one comes from the issue:
 the exception line and frames of a stack trace, plus test functions named
-by those frames or by any pytest node id written into the text. The
+by those frames, by any pytest node id written into the text, or by a
+runner's failure line inside the output the reporter pasted. The
 observed one comes from the run: pytest's `E ` failure detail and plain
 tracebacks first, and pytest's short summary line last, since pytest
 truncates that one. When a run printed no pytest summary, failing tests
@@ -227,7 +228,7 @@ the bug:
   repository's layout, so anything above the file name is not stable
   enough to fail a run over.
 
-A frame with no function name on either side is `unknown`, not a match:
+A frame whose function is unnamed on either side is `unknown`, not a match:
 naming the same function is the point. A file that differs is a mismatch
 even when neither side names a function. Frames are read from pytest's
 failure body, which locates frames as `path:line:` and names the function
@@ -367,7 +368,8 @@ src/issue2repro/
   confidence.py   weighted scoring plus trace-frame-to-clone path mapping
   workspace.py    renders issue.md, metadata.json, reproduce.sh, Dockerfile,
                   and plans the setup/repro step split
-  signature.py    pure: expected and observed failure signatures, and the
+  signature.py    pure: expected and observed failure signatures (exception,
+                  innermost frame, failing tests across five runners) and the
                   comparison between them. Knows nothing about running
   verify.py       runs a workspace (Docker or host) and decides the verdict
   models.py       dataclasses shared across the pipeline
@@ -386,7 +388,7 @@ the ordering rules that decide a verdict before a comparison is reached.
 
 Tests run entirely offline: issue payloads are committed JSON fixtures,
 repositories are built in temp directories, and the end-to-end `verify`
-tests run scripts that import nothing, so no test needs the network,
+tests run code that needs nothing installed, so no test needs the network,
 Docker, or live GitHub. `demo.sh` does execute real reproductions, which
 install the fixture project's test dependency exactly as a real
 reproduction would.
