@@ -123,15 +123,22 @@ class Step:
 
 @dataclass
 class FailureSignature:
-    """What a failure looks like: an exception and the tests it broke.
+    """What a failure looks like: an exception, the frames it came from, and
+    the tests it broke.
 
     Used for both the signature the issue describes (expected) and the one
     a run actually produced (observed).
+
+    ``frames`` is always stored the way Python prints a traceback, outermost
+    first, so ``frames[-1]`` is the frame that raised. Node prints its stack
+    the other way round and is reversed on the way in, so the last element
+    means the same thing for every language.
     """
 
     exception_type: str | None = None
     exception_message: str | None = None
     message_truncated: bool = False
+    frames: list[StackFrame] = field(default_factory=list)
     tests: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
 
@@ -162,13 +169,15 @@ class SignatureMatch:
 
     exception: str = "unknown"
     message: str = "unknown"
+    frames: str = "unknown"
     tests: str = "unknown"
     matched_tests: list[str] = field(default_factory=list)
+    matched_frame: str = ""
     notes: list[str] = field(default_factory=list)
 
     @property
-    def components(self) -> tuple[str, str, str]:
-        return (self.exception, self.message, self.tests)
+    def components(self) -> tuple[str, str, str, str]:
+        return (self.exception, self.message, self.frames, self.tests)
 
 
 @dataclass

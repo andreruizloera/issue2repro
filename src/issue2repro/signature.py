@@ -9,15 +9,16 @@ questions and nothing else:
 - do they match, component by component (:func:`compare_signatures`)
 
 Everything here is a heuristic over text, and it is labeled as one: a
-"match" means the exception type and the failing test line up, not that
-the two runs executed the same code path.
+"match" means the exception type, the frame it was raised in, and the
+failing test line up, not that the two runs executed the same bytecode.
 """
 
 from __future__ import annotations
 
 import re
 
-from issue2repro.models import FailureSignature, Signals, SignatureMatch
+from issue2repro.extract import extract_node_traces, extract_python_traces
+from issue2repro.models import FailureSignature, Signals, SignatureMatch, StackFrame
 
 # An exception line, as printed by Python, Node, or pytest's "E   " echo.
 # The type name must end in a recognizable suffix, which keeps ordinary
@@ -36,6 +37,19 @@ _PYTEST_E_LINE = re.compile(r"^E\s{2,}(?P<body>.+)$")
 _NODE_ID = re.compile(r"(?P<nodeid>[\w./-]+\.py::[\w\[\]:.\-]+)")
 
 _TEST_NAME = re.compile(r"^test[\w]*$")
+
+# pytest prints no "File ..., line N, in fn" frames. It locates each frame on
+# a line of its own at the end of that frame's block:
+#   "tests/test_evaluate.py:13:"            (the default long traceback)
+#   "src/tinycalc/evaluate.py:23: ValueError"  (the last frame, with the type)
+#   "tests/test_evaluate.py:13: in test_x"     (--tb=short and collection errors)
+# The long form names no function, so the function is read from the "def"
+# line pytest echoed above the location.
+_PYTEST_FRAME_IN = re.compile(
+    r"^(?P<path>[\w./\\+-]+\.\w+):(?P<line>\d+): in (?P<symbol>[\w.<>]+)$"
+)
+_PYTEST_FRAME_AT = re.compile(r"^(?P<path>[\w./\\+-]+\.\w+):(?P<line>\d+):(?:\s+[A-Za-z_][\w.]*)?$")
+_DEF_LINE = re.compile(r"^\s*(?:async\s+)?def\s+(?P<symbol>\w+)\s*\(")
 
 # pytest truncates the short-summary detail with a trailing ellipsis.
 _ELLIPSIS = "..."
@@ -58,13 +72,130 @@ def _test_name(nodeid: str) -> str:
     return tail.split("[", 1)[0]
 
 
+def _basename(path: str) -> str:
+    """The file name, with every directory prefix dropped."""
+    return path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _is_pytest_rule(line: str) -> bool:
+    """True for a pytest section rule: '=== FAILURES ===', '__ test_x __', '_ _ _'."""
+    stripped = line.strip()
+    if len(stripped) < 3:
+        return False
+    body = stripped.replace(" ", "")
+    if len(body) >= 3 and all(char in "_=" for char in body):
+        return True
+    return bool(re.match(r"^[_=]{3,}.*[_=]{3,}$", stripped))
+
+
+def _first_def(lines: list[str]) -> str | None:
+    """The function pytest echoed for a frame: the first 'def' of the block.
+
+    The first one, not the last: pytest prints the frame's own function and
+    then its body, so a nested def further down belongs to the body, not to
+    the frame.
+    """
+    for line in lines:
+        match = _DEF_LINE.match(line)
+        if match:
+            return match["symbol"]
+    return None
+
+
+def pytest_frames(output: str) -> list[StackFrame]:
+    """Frames from pytest's failure body, outermost first.
+
+    With more than one failing test the blocks concatenate, so the last frame
+    is the innermost frame of the last reported failure. That is the same
+    "last one wins" rule the exception line already follows.
+    """
+    lines = output.splitlines()
+    frames: list[StackFrame] = []
+    block_start = 0
+    for index, raw in enumerate(lines):
+        line = raw.rstrip()
+        if _is_pytest_rule(line):
+            block_start = index + 1
+            continue
+        located = _PYTEST_FRAME_IN.match(line)
+        symbol = located["symbol"] if located else None
+        if located is None:
+            located = _PYTEST_FRAME_AT.match(line)
+            if located is None:
+                continue
+            symbol = _first_def(lines[block_start:index])
+        frames.append(StackFrame(path=located["path"], line=int(located["line"]), symbol=symbol))
+        block_start = index + 1
+    return frames
+
+
+def observed_frames(output: str) -> tuple[list[StackFrame], str | None]:
+    """The frames this run's output shows, with the source that produced them.
+
+    pytest's failure body first, since a pytest run is the case the tool
+    generates most often; then a plain Python traceback; then a Node stack,
+    which prints innermost first and is reversed so that ``frames[-1]`` means
+    the same thing everywhere.
+    """
+    frames = pytest_frames(output)
+    if frames:
+        return frames, "pytest traceback frames"
+    python = [trace for trace in extract_python_traces(output) if trace.frames]
+    if python:
+        return python[-1].frames, "traceback frames in the output"
+    node = [trace for trace in extract_node_traces(output) if trace.frames]
+    if node:
+        return list(reversed(node[-1].frames)), "node stack frames in the output"
+    return [], None
+
+
+def describe_frame(frame: StackFrame) -> str:
+    """One frame as a person reads it: 'evaluate (src/tinycalc/evaluate.py)'."""
+    return f"{frame.symbol or 'an unnamed function'} ({frame.path})"
+
+
+def compare_frames(
+    expected: list[StackFrame], observed: list[StackFrame]
+) -> tuple[str, str, str | None]:
+    """Compare where the exception was raised: match, mismatch, or unknown.
+
+    Only the innermost frame is compared, the one the exception was raised
+    in. The caller chain above it is not evidence: the reporter ran a script
+    and the reproduction ran pytest, so the outer frames legitimately differ
+    on two runs of the very same bug. The innermost frame is the part both
+    have in common when the bug is the same.
+
+    A frame is compared on its function name and its file's basename. Line
+    numbers drift with any commit, and the directory prefix differs between
+    the reporter's checkout and the container (an installed package does not
+    even keep the repository's own layout), so neither is stable enough to
+    fail a run over.
+
+    Returns (verdict, label, note). A file that differs is a mismatch even
+    when neither side names a function, but a matching file alone is not
+    enough for a match: naming the same function is the point.
+    """
+    if not expected or not observed:
+        return "unknown", "", None
+    left, right = expected[-1], observed[-1]
+    detail = f"the issue's traceback raises in {describe_frame(left)}, "
+    if _basename(left.path) != _basename(right.path):
+        return "mismatch", "", detail + f"the run raised in {describe_frame(right)}"
+    if left.symbol and right.symbol and left.symbol != right.symbol:
+        return "mismatch", "", detail + f"the run raised in {describe_frame(right)}"
+    if not left.symbol or not right.symbol:
+        return "unknown", "", None
+    return "match", f"{right.symbol} in {right.path}", None
+
+
 def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
     """The failure the issue describes.
 
-    The exception comes from the last recognized stack trace that carries an
-    error line. Failing tests come from two places: trace frames whose symbol
-    is a test function in a test file, and pytest node ids written into the
-    issue text by hand.
+    The exception and the frames both come from the last recognized stack
+    trace that carries an error line, so they describe one failure rather
+    than two halves of different ones. Failing tests come from two places:
+    trace frames whose symbol is a test function in a test file, and pytest
+    node ids written into the issue text by hand.
     """
     signature = FailureSignature()
 
@@ -75,7 +206,12 @@ def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
         if exc_type:
             signature.exception_type = exc_type
             signature.exception_message = message
+            signature.frames = (
+                list(reversed(trace.frames)) if trace.language == "node" else list(trace.frames)
+            )
             signature.sources.append(f"{trace.language} stack trace in the issue")
+            if trace.frames and "stack frames in the issue" not in signature.sources:
+                signature.sources.append("stack frames in the issue")
 
     tests: list[str] = []
     for trace in signals.traces:
@@ -104,6 +240,7 @@ def observed_signature(output: str, expect_type: str | None = None) -> FailureSi
     Exception text is taken from the most specific source available, in
     order: pytest's "E   " echo and plain tracebacks (both untruncated),
     then pytest's short-summary line, which pytest may have truncated.
+    Frames come from :func:`observed_frames`.
 
     ``expect_type`` is a targeted fallback. The general matcher only
     recognizes exception names with a conventional suffix, so a project's
@@ -157,6 +294,11 @@ def observed_signature(output: str, expect_type: str | None = None) -> FailureSi
         signature.exception_type, signature.exception_message = truncated_detail
         signature.message_truncated = True
         signature.sources.append("pytest short summary (message may be truncated)")
+
+    frames, frame_source = observed_frames(output)
+    signature.frames = frames
+    if frame_source:
+        signature.sources.append(frame_source)
 
     signature.tests = tests
     return signature
@@ -221,6 +363,18 @@ def compare_signatures(expected: FailureSignature, observed: FailureSignature) -
             match.notes.append("pytest truncated the message; compared as a prefix")
     else:
         match.message = "unknown"
+
+    if match.exception == "mismatch":
+        # The run already failed with a different exception. Two failures can
+        # share a frame and still be different bugs, so a frame that agrees
+        # here is not evidence for anything and must not soften the verdict.
+        match.frames = "unknown"
+    else:
+        match.frames, match.matched_frame, frame_note = compare_frames(
+            expected.frames, observed.frames
+        )
+        if frame_note:
+            match.notes.append(frame_note)
 
     if not expected.tests:
         match.tests = "unknown"

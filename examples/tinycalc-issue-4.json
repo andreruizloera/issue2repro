@@ -1,0 +1,5 @@
+{
+  "title": "Negative operands crash inside tokenize()",
+  "body": "Same symptom as the other negative-number report, but on 0.0.9 the crash comes out of the tokenizer, which converted tokens as it scanned them. `tokenize` calls `int()` on the bare `-` and dies there.\n\nSteps to reproduce:\n\n```bash\npip install pytest\npython -m pytest tests/test_evaluate.py -x\n```\n\nOutput:\n\n```\nTraceback (most recent call last):\n  File \"tests/test_evaluate.py\", line 13, in test_negative_operand\n    assert evaluate(\"2 + -3\") == -1\n  File \"src/tinycalc/evaluate.py\", line 12, in tokenize\n    return [int(tok) for tok in _TOKEN.findall(expr)]\nValueError: invalid literal for int() with base 10: '-'\n```\n\nExpected: the tokenizer keeps `-3` as one token instead of calling `int(\"-\")`.",
+  "comments": []
+}

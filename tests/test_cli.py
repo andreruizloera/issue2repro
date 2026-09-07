@@ -180,6 +180,28 @@ class TestVerify:
         assert "Verification: REPRODUCED" in out
         assert "exception: match" in out
         assert "message:   exact" in out
+        # the issue's path is repository-relative, the run's is absolute
+        assert "frames:    match (widen in " in out
+
+    def test_the_same_exception_in_another_function_is_not_a_reproduction(
+        self, crash_clone_url, tmp_path, capsys
+    ):
+        """The exception type, the message, and the file all line up. Only the
+        function the traceback ends in differs, and that is enough."""
+        issue = write_issue(
+            tmp_path / "issue.json",
+            "python3 tools/repro.py",
+            "ValueError: invalid literal for int() with base 10: '-'",
+            symbol="narrow",
+        )
+        code = self._verify(tmp_path, crash_clone_url, issue)
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "Verification: PARTIAL" in out
+        assert "exception: match" in out
+        assert "frames:    mismatch" in out
+        assert "the issue's traceback raises in narrow" in out
+        assert "the run raised in widen" in out
 
     def test_a_different_exception_is_not_a_reproduction(self, crash_clone_url, tmp_path, capsys):
         issue = write_issue(

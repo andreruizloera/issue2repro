@@ -122,6 +122,7 @@ check "$WORK/v1.txt" "exception: match"
 check "$WORK/v1.txt" "message:   exact"
 check "$WORK/v1.txt" "  expected (from the issue): ValueError: invalid literal for int() with base 10: '-'; test_negative_operand"
 check "$WORK/v1.txt" "  observed (from the run):   ValueError: invalid literal for int() with base 10: '-'; tests/test_evaluate.py::test_negative_operand"
+check "$WORK/v1.txt" "frames:    match (evaluate in src/tinycalc/evaluate.py)"
 check "$WORK/v1.txt" "tests:     match (test_negative_operand)"
 
 echo
@@ -158,6 +159,26 @@ check "$WORK/v3.txt" "exception: mismatch"
 check "$WORK/v3.txt" "tests:     mismatch"
 check "$WORK/v3.txt" "note: the issue reports ZeroDivisionError, the run raised ValueError"
 check "$WORK/v3.txt" "note: the issue points at test_divide_by_zero, but the failing test(s) were tests/test_evaluate.py::test_negative_operand"
+
+echo
+echo "== issue2repro verify: the same exception, raised somewhere else =="
+code=0
+"${I2R[@]}" verify "https://github.com/example/tinycalc/issues/4" \
+    --issue-file "$ROOT/examples/tinycalc-issue-4.json" \
+    --clone-url "$CLONE" \
+    --output "$WORK/repro4" \
+    --no-docker >"$WORK/v4.txt" 2>&1 || code=$?
+sed -n '/^Verification:/,$p' "$WORK/v4.txt"
+check_exit "$code" 1 "verify (same exception, different frame)"
+check "$WORK/v4.txt" "Verification: PARTIAL"
+check "$WORK/v4.txt" "the run failed, and only part of the reported signature matched"
+check "$WORK/v4.txt" "  expected (from the issue): ValueError: invalid literal for int() with base 10: '-'; test_negative_operand"
+check "$WORK/v4.txt" "  observed (from the run):   ValueError: invalid literal for int() with base 10: '-'; tests/test_evaluate.py::test_negative_operand"
+check "$WORK/v4.txt" "exception: match"
+check "$WORK/v4.txt" "message:   exact"
+check "$WORK/v4.txt" "frames:    mismatch"
+check "$WORK/v4.txt" "tests:     match (test_negative_operand)"
+check "$WORK/v4.txt" "note: the issue's traceback raises in tokenize (src/tinycalc/evaluate.py), the run raised in evaluate (src/tinycalc/evaluate.py)"
 
 echo
 if [ "$FAILURES" -ne 0 ]; then

@@ -77,10 +77,10 @@ def crash_repo(tmp_path: Path) -> Path:
     return root
 
 
-def write_issue(path: Path, command: str, error: str) -> Path:
-    """Write an issue payload whose repro step is `command` and whose
-    traceback ends in `error`. Keeps verdict tests readable without a
-    committed fixture file per case."""
+def write_issue(path: Path, command: str, error: str, symbol: str = "widen") -> Path:
+    """Write an issue payload whose repro step is `command`, whose traceback
+    is raised in `symbol`, and whose exception line is `error`. Keeps verdict
+    tests readable without a committed fixture file per case."""
     body = (
         "It blows up every time.\n\n"
         f"```bash\n{command}\n```\n\n"
@@ -88,7 +88,7 @@ def write_issue(path: Path, command: str, error: str) -> Path:
         "Traceback (most recent call last):\n"
         '  File "tools/repro.py", line 5, in <module>\n'
         '    widen("-")\n'
-        '  File "tools/repro.py", line 2, in widen\n'
+        f'  File "tools/repro.py", line 2, in {symbol}\n'
         "    raise ValueError(...)\n"
         f"{error}\n"
         "```\n"

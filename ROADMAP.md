@@ -33,13 +33,11 @@ implemented today; the README only documents what works now.
 
 `issue2repro verify` shipped: it runs reproduce.sh in the generated
 Docker image (container by default, host only with `--no-docker`),
-compares the failure it observed against the one the issue describes, and
-reports a verdict beside the inferred confidence score rather than
-overwriting it. What is still open:
+compares the failure it observed against the one the issue describes
+(exception type, message, the innermost stack frame, and the failing
+tests), and reports a verdict beside the inferred confidence score rather
+than overwriting it. What is still open:
 
-- Compare stack frames, not just the exception line. Two `KeyError:
-  'currency'` failures raised in different functions currently read as
-  the same signature.
 - Cache the built image and the verdict, keyed by the clone's HEAD and
   the step plan, so re-verifying an issue after a fix costs one run
   instead of two.

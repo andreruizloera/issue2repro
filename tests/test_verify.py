@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from issue2repro.github import Issue2ReproError
-from issue2repro.models import FailureSignature, Step
+from issue2repro.models import FailureSignature, StackFrame, Step
 from issue2repro.verify import (
     EXIT_CODES,
     RunOutcome,
@@ -265,6 +265,27 @@ class TestRendering:
         assert "expected (from the issue)" in text
         assert "observed (from the run)" in text
         assert "test_negative_operand" in text
+
+    def test_a_frame_mismatch_names_both_frames(self):
+        expected = FailureSignature(
+            exception_type="ValueError",
+            exception_message="invalid literal for int() with base 10: '-'",
+            frames=[StackFrame(path="src/tinycalc/evaluate.py", line=12, symbol="tokenize")],
+            tests=["test_negative_operand"],
+        )
+        output = (
+            "    def evaluate(expr):\n"
+            ">       value = int(tokens[i + 1])\n"
+            "E       ValueError: invalid literal for int() with base 10: '-'\n"
+            "\n"
+            "src/tinycalc/evaluate.py:23: ValueError\n"
+        )
+        verification = decide(expected, outcome(output=output))
+        text = "\n".join(render_verification(verification))
+        assert verification.verdict == "partial"
+        assert "frames:    mismatch" in text
+        assert "raises in tokenize (src/tinycalc/evaluate.py)" in text
+        assert "the run raised in evaluate (src/tinycalc/evaluate.py)" in text
 
     def test_a_mismatch_prints_its_reason(self):
         verification = decide(EXPECTED, outcome(output="E   TypeError: bad\n"))

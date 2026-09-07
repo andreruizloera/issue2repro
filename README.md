@@ -113,7 +113,7 @@ the reported bug, a failed `pip install`, a missing system library, or a
 completely unrelated test that was already red. `issue2repro verify` runs
 the reproduction and answers the question the exit code cannot.
 
-The demo's three verify parts, all real output:
+The demo's four verify parts, all real output:
 
 ```
 == issue2repro verify: the reported failure, checked against the run ==
@@ -123,6 +123,7 @@ Verification: REPRODUCED (observed by running reproduce.sh on this machine)
   observed (from the run):   ValueError: invalid literal for int() with base 10: '-'; tests/test_evaluate.py::test_negative_operand
   exception: match
   message:   exact
+  frames:    match (evaluate in src/tinycalc/evaluate.py)
   tests:     match (test_negative_operand)
 ```
 
@@ -152,6 +153,23 @@ Verification: DIFFERENT-FAILURE (observed by running reproduce.sh on this machin
   note: the issue points at test_divide_by_zero, but the failing test(s) were tests/test_evaluate.py::test_negative_operand
 ```
 
+And the hard case: an issue reporting the same exception, with the same
+message, breaking the same test, raised in a different function. The
+exception line alone cannot tell these apart. The frame can:
+
+```
+== issue2repro verify: the same exception, raised somewhere else ==
+Verification: PARTIAL (observed by running reproduce.sh on this machine)
+  the run failed, and only part of the reported signature matched
+  expected (from the issue): ValueError: invalid literal for int() with base 10: '-'; test_negative_operand
+  observed (from the run):   ValueError: invalid literal for int() with base 10: '-'; tests/test_evaluate.py::test_negative_operand
+  exception: match
+  message:   exact
+  frames:    mismatch
+  tests:     match (test_negative_operand)
+  note: the issue's traceback raises in tokenize (src/tinycalc/evaluate.py), the run raised in evaluate (src/tinycalc/evaluate.py)
+```
+
 ### Verdicts and exit codes
 
 | Verdict | Exit | Meaning |
@@ -170,12 +188,13 @@ it were "no" is the same rubber stamp as one that reports it as "yes".
 
 ### How the comparison works
 
-The signature is an exception type, its message, and the failing test
-names. The expected one comes from the issue: the exception line of a
-stack trace, plus test functions named by trace frames or by any pytest
-node id written into the text. The observed one comes from the run:
-pytest's `E ` failure detail and plain tracebacks first, and pytest's
-short summary line last, since pytest truncates that one.
+The signature is an exception type, its message, the frame it was raised
+in, and the failing test names. The expected one comes from the issue:
+the exception line and frames of a stack trace, plus test functions named
+by those frames or by any pytest node id written into the text. The
+observed one comes from the run: pytest's `E ` failure detail and plain
+tracebacks first, and pytest's short summary line last, since pytest
+truncates that one.
 
 Each component compares to `match`, `mismatch`, or `unknown`, and
 `unknown` is never evidence in either direction. One mismatch alongside a
@@ -184,12 +203,44 @@ match is `partial`, never `reproduced`. Messages compare as `exact`,
 `different`; a different message under a matching type is enough to make
 a verdict `partial`.
 
-Two ordering rules matter more than the comparison itself:
+#### Which frame, and which part of it
+
+Only the innermost frame is compared, the one the exception was raised
+in, and it is compared on the function name and the file's basename.
+Everything else in a frame moves for reasons that have nothing to do with
+the bug:
+
+- **The caller chain above it is not compared.** The reporter ran a
+  script, the reproduction runs pytest, so their outer frames legitimately
+  differ on two runs of the very same bug. Requiring the whole stack to
+  line up would fail those. The frame that raised is the part both runs
+  have in common when the bug is the same.
+- **Line numbers are ignored.** They drift with any commit between the
+  report and today.
+- **The directory prefix is ignored.** The reporter's absolute paths are
+  not the container's, and an installed package does not even keep the
+  repository's layout, so anything above the file name is not stable
+  enough to fail a run over.
+
+A frame with no function name on either side is `unknown`, not a match:
+naming the same function is the point. A file that differs is a mismatch
+even when neither side names a function. Frames are read from pytest's
+failure body, which locates frames as `path:line:` and names the function
+only in the source it echoes above, and from plain Python and Node
+tracebacks; Node prints its stack innermost first and is reversed on the
+way in so the innermost frame means the same thing everywhere.
+
+Three ordering rules matter more than the comparison itself:
 
 - A failure during a **setup** step is decided before any signature is
   compared. The reproduction never ran, so nothing in the output is
   evidence about the bug, even when the output happens to contain the
   reported exception. There is a test named for exactly that.
+- **Frames are not compared once the exception type already differs.** Two
+  failures raised in the same function are still two failures, so a frame
+  that happens to agree there is not evidence and must not soften a clear
+  `different-failure` into a `partial`. Frames refine a matching
+  exception; they never rescue a mismatched one.
 - **The inferred confidence score is not overwritten** by a verdict. The
   percentage measures how much checkable signal the issue carried; the
   verdict measures what happened when the reproduction ran. "45%
@@ -215,6 +266,7 @@ Verification: REPRODUCED (observed by running reproduce.sh in Docker (issue2repr
   observed (from the run):   ValueError: invalid literal for int() with base 10: '-'; tests/test_evaluate.py::test_negative_operand
   exception: match
   message:   exact
+  frames:    match (evaluate in src/tinycalc/evaluate.py)
   tests:     match (test_negative_operand)
 ```
 
@@ -348,10 +400,21 @@ reproduction would.
   and `verify --no-docker` are still arbitrary code execution by design.
 - Issues describing bugs in a different repository than the one they are
   filed against will map poorly.
-- **A signature match is a claim about text, not about code paths.**
-  Two different bugs that raise `KeyError: 'currency'` in the same test
-  compare as reproduced. The verdict block always prints both signatures
-  so the claim can be checked at a glance.
+- **A signature match is still a claim about text.** The innermost frame
+  is compared now, so two `KeyError: 'currency'` failures raised in
+  different functions no longer read as the same bug. Two of them raised
+  in the *same* function, for different reasons, still do: same type, same
+  message, same frame, and nothing in the text says otherwise. The verdict
+  block always prints both signatures so the claim can be checked at a
+  glance.
+- **Frame comparison needs a traceback in the issue.** An issue that
+  describes its bug in prose gives no frames, which is `unknown`, and the
+  verdict is then exactly what it was before frames were compared. It is
+  a sharper answer when the reporter pasted a traceback, never a stricter
+  one when they did not.
+- Frames are read from pytest, plain Python tracebacks, and Node stacks.
+  Other runners print their own formats, so on those projects the frame
+  comparison is `unknown` and only the exception line is compared.
 - **The setup/repro split is a heuristic** over the command's first word:
   a package manager asked to install, a `cd`, or an `export` is setup,
   and the last command is always treated as the reproduction. A repro
@@ -373,8 +436,8 @@ reproduction would.
 
 See [ROADMAP.md](ROADMAP.md): more ecosystems (Rust, Go, Ruby, Java),
 interpreter version pinning, checkout of the version the issue names,
-richer verification (comparing frames, not just the exception line), and
-batch triage over a whole issue tracker.
+per-test output for more runners, caching a verified run, and batch
+triage over a whole issue tracker.
 
 ## Contributing
 

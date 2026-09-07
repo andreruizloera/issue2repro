@@ -421,6 +421,10 @@ def render_verification(verification: Verification) -> list[str]:
         lines.append(f"  exception: {match.exception}")
     if match.message != "unknown":
         lines.append(f"  message:   {match.message}")
+    if match.frames == "match":
+        lines.append(f"  frames:    match ({match.matched_frame})")
+    elif match.frames == "mismatch":
+        lines.append("  frames:    mismatch")
     if match.tests == "match":
         lines.append(f"  tests:     match ({', '.join(match.matched_tests)})")
     elif match.tests == "mismatch":

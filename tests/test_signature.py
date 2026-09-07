@@ -6,10 +6,13 @@ Everything here is text in, verdict out. No subprocess, no Docker, no clone.
 from issue2repro.extract import extract_signals
 from issue2repro.models import FailureSignature, Signals, StackFrame, StackTrace
 from issue2repro.signature import (
+    compare_frames,
     compare_messages,
     compare_signatures,
     expected_signature,
+    observed_frames,
     observed_signature,
+    pytest_frames,
     verdict_from_match,
 )
 
@@ -28,6 +31,46 @@ src/tinycalc/evaluate.py:23: ValueError
 FAILED tests/test_evaluate.py::test_negative_operand - ValueError: invalid li...
 ========================= 1 failed, 2 passed in 0.05s ==========================
 """
+
+# pytest's default traceback, verbatim from a real run of the tinycalc
+# fixture. It names no frame the way Python does; each frame ends in a
+# "path:line:" line, and the function has to be read from the echoed source.
+PYTEST_LONG_OUTPUT = """\
+=================================== FAILURES ===================================
+____________________________ test_negative_operand _____________________________
+
+    def test_negative_operand():
+>       assert evaluate("2 + -3") == -1
+
+tests/test_evaluate.py:13:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+expr = '2 + -3'
+
+    def evaluate(expr: str) -> int:
+        tokens = tokenize(expr)
+        for i in range(1, len(tokens), 2):
+>           value = int(tokens[i + 1])
+E           ValueError: invalid literal for int() with base 10: '-'
+
+src/tinycalc/evaluate.py:23: ValueError
+=========================== short test summary info ============================
+FAILED tests/test_evaluate.py::test_negative_operand - ValueError: invalid li...
+========================= 1 failed, 2 passed in 0.09s ==========================
+"""
+
+PLAIN_TRACEBACK = """\
+Traceback (most recent call last):
+  File "/tmp/repro/source/tools/repro.py", line 5, in <module>
+    widen("-")
+  File "/tmp/repro/source/tools/repro.py", line 2, in widen
+    raise ValueError("invalid literal for int() with base 10: '-'")
+ValueError: invalid literal for int() with base 10: '-'
+"""
+
+
+def frame(path: str, line: int, symbol: str | None) -> StackFrame:
+    return StackFrame(path=path, line=line, symbol=symbol)
 
 
 class TestExpectedSignature:
@@ -73,6 +116,42 @@ class TestExpectedSignature:
         signature = expected_signature(Signals(), text)
         assert signature.tests == ["test_discount"]
         assert "pytest node id in the issue text" in signature.sources
+
+    def test_frames_come_from_the_trace_that_carried_the_exception(self):
+        signals = Signals(
+            traces=[
+                StackTrace(
+                    language="python",
+                    frames=[
+                        frame("tests/test_cart.py", 9, "test_discount"),
+                        frame("src/shop/pricing.py", 44, "apply_discount"),
+                    ],
+                    error="KeyError: 'currency'",
+                )
+            ]
+        )
+        signature = expected_signature(signals)
+        assert [f.symbol for f in signature.frames] == ["test_discount", "apply_discount"]
+        assert signature.frames[-1].path == "src/shop/pricing.py"
+
+    def test_node_frames_are_reversed_so_the_innermost_is_last(self):
+        signals = Signals(
+            traces=[
+                StackTrace(
+                    language="node",
+                    frames=[
+                        frame("/app/src/cart.js", 12, "applyDiscount"),
+                        frame("/app/src/index.js", 3, "main"),
+                    ],
+                    error="TypeError: cannot read properties of undefined",
+                )
+            ]
+        )
+        signature = expected_signature(signals)
+        assert signature.frames[-1].symbol == "applyDiscount"
+
+    def test_an_issue_with_no_traceback_carries_no_frames(self, vague_issue):
+        assert expected_signature(extract_signals(vague_issue.full_text)).frames == []
 
     def test_node_id_and_trace_do_not_duplicate_a_test(self):
         signals = Signals(
@@ -146,6 +225,104 @@ class TestObservedSignature:
 
     def test_clean_output_has_no_signature(self):
         assert observed_signature("3 passed in 0.10s\n").is_empty
+
+
+class TestObservedFrames:
+    def test_pytest_long_traceback_names_each_frames_function(self):
+        frames = pytest_frames(PYTEST_LONG_OUTPUT)
+        assert [(f.path, f.symbol) for f in frames] == [
+            ("tests/test_evaluate.py", "test_negative_operand"),
+            ("src/tinycalc/evaluate.py", "evaluate"),
+        ]
+
+    def test_short_traceback_frames_name_their_function_directly(self):
+        output = (
+            "tests/test_cart.py:9: in test_discount\n"
+            "    apply_discount(cart)\n"
+            "src/shop/pricing.py:44: in apply_discount\n"
+            "    return line['currency']\n"
+            "E   KeyError: 'currency'\n"
+        )
+        frames = pytest_frames(output)
+        assert [f.symbol for f in frames] == ["test_discount", "apply_discount"]
+
+    def test_a_plain_traceback_is_read_when_pytest_printed_none(self):
+        frames, source = observed_frames(PLAIN_TRACEBACK)
+        assert [f.symbol for f in frames] == ["<module>", "widen"]
+        assert source == "traceback frames in the output"
+
+    def test_node_stack_frames_are_reversed_so_the_innermost_is_last(self):
+        output = (
+            "TypeError: cannot read properties of undefined\n"
+            "    at applyDiscount (/app/src/cart.js:12:9)\n"
+            "    at main (/app/src/index.js:3:1)\n"
+        )
+        frames, source = observed_frames(output)
+        assert [f.symbol for f in frames] == ["main", "applyDiscount"]
+        assert source == "node stack frames in the output"
+
+    def test_output_with_no_frames_yields_none(self):
+        frames, source = observed_frames("3 passed in 0.10s\n")
+        assert frames == []
+        assert source is None
+
+    def test_the_signature_records_the_frames_and_their_source(self):
+        observed = observed_signature(PYTEST_LONG_OUTPUT)
+        assert observed.frames[-1].symbol == "evaluate"
+        assert "pytest traceback frames" in observed.sources
+
+
+class TestCompareFrames:
+    def test_same_function_and_file_is_a_match(self):
+        verdict, label, note = compare_frames(
+            [frame("src/shop/pricing.py", 44, "apply_discount")],
+            [frame("src/shop/pricing.py", 51, "apply_discount")],
+        )
+        assert verdict == "match"
+        assert label == "apply_discount in src/shop/pricing.py"
+        assert note is None
+
+    def test_the_directory_prefix_and_line_number_are_ignored(self):
+        verdict, _, _ = compare_frames(
+            [frame("tools/repro.py", 2, "widen")],
+            [frame("/tmp/xyz/source/tools/repro.py", 900, "widen")],
+        )
+        assert verdict == "match"
+
+    def test_the_same_exception_in_another_function_is_a_mismatch(self):
+        verdict, _, note = compare_frames(
+            [frame("src/tinycalc/evaluate.py", 12, "tokenize")],
+            [frame("src/tinycalc/evaluate.py", 23, "evaluate")],
+        )
+        assert verdict == "mismatch"
+        assert "tokenize" in note and "evaluate" in note
+
+    def test_the_same_function_name_in_another_file_is_a_mismatch(self):
+        verdict, _, note = compare_frames(
+            [frame("src/shop/pricing.py", 44, "load")],
+            [frame("src/shop/config.py", 44, "load")],
+        )
+        assert verdict == "mismatch"
+        assert "config.py" in note
+
+    def test_only_the_innermost_frame_is_compared(self):
+        """The caller chain differs between a reporter's script and pytest."""
+        verdict, _, _ = compare_frames(
+            [frame("run_me.py", 1, "<module>"), frame("src/shop/pricing.py", 44, "apply")],
+            [frame("tests/test_cart.py", 9, "test_discount"), frame("pricing.py", 44, "apply")],
+        )
+        assert verdict == "match"
+
+    def test_a_missing_side_is_unknown(self):
+        assert compare_frames([], [frame("a.py", 1, "f")])[0] == "unknown"
+        assert compare_frames([frame("a.py", 1, "f")], [])[0] == "unknown"
+
+    def test_an_unnamed_function_on_one_side_is_unknown_not_a_match(self):
+        verdict, _, _ = compare_frames(
+            [frame("src/shop/pricing.py", 44, "apply_discount")],
+            [frame("src/shop/pricing.py", 44, None)],
+        )
+        assert verdict == "unknown"
 
 
 class TestCompareMessages:
@@ -237,8 +414,79 @@ class TestCompareSignatures:
 
     def test_nothing_comparable_is_unknown_not_a_match(self):
         match = compare_signatures(FailureSignature(), FailureSignature())
-        assert match.components == ("unknown", "unknown", "unknown")
+        assert match.components == ("unknown", "unknown", "unknown", "unknown")
         assert verdict_from_match(match) == "unknown"
+
+    def test_the_same_exception_in_another_function_is_not_a_reproduction(self):
+        """The headline case: type, message, and test all line up, and the
+        failure still came out of a different function."""
+        expected = FailureSignature(
+            exception_type="ValueError",
+            exception_message="invalid literal for int() with base 10: '-'",
+            frames=[
+                StackFrame(path="tests/test_evaluate.py", line=13, symbol="test_negative_operand"),
+                StackFrame(path="src/tinycalc/evaluate.py", line=12, symbol="tokenize"),
+            ],
+            tests=["test_negative_operand"],
+        )
+        match = compare_signatures(expected, observed_signature(PYTEST_LONG_OUTPUT))
+        assert match.exception == "match"
+        assert match.message == "exact"
+        assert match.tests == "match"
+        assert match.frames == "mismatch"
+        assert verdict_from_match(match) == "partial"
+        assert any("tokenize" in note and "evaluate" in note for note in match.notes)
+
+    def test_the_same_exception_in_the_same_function_stays_reproduced(self):
+        expected = FailureSignature(
+            exception_type="ValueError",
+            exception_message="invalid literal for int() with base 10: '-'",
+            frames=[StackFrame(path="src/tinycalc/evaluate.py", line=23, symbol="evaluate")],
+            tests=["test_negative_operand"],
+        )
+        match = compare_signatures(expected, observed_signature(PYTEST_LONG_OUTPUT))
+        assert match.frames == "match"
+        assert match.matched_frame == "evaluate in src/tinycalc/evaluate.py"
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_an_issue_with_no_traceback_leaves_the_verdict_untouched(self):
+        """No frames on the expected side is unknown, and unknown is never
+        evidence: the verdict must be exactly what it was before frames
+        were compared at all."""
+        expected = FailureSignature(
+            exception_type="ValueError",
+            exception_message="invalid literal for int() with base 10: '-'",
+            tests=["test_negative_operand"],
+        )
+        match = compare_signatures(expected, observed_signature(PYTEST_LONG_OUTPUT))
+        assert expected.frames == []
+        assert match.frames == "unknown"
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_a_run_that_prints_no_frames_is_unknown_not_a_mismatch(self):
+        expected = FailureSignature(
+            exception_type="ValueError",
+            exception_message="boom",
+            frames=[StackFrame(path="src/app.py", line=3, symbol="handle")],
+        )
+        observed = FailureSignature(exception_type="ValueError", exception_message="boom")
+        match = compare_signatures(expected, observed)
+        assert match.frames == "unknown"
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_frames_are_not_compared_under_a_different_exception(self):
+        """Two failures raised in the same function are still two failures.
+        A frame that agrees must not soften a clear different-failure."""
+        expected = FailureSignature(
+            exception_type="ZeroDivisionError",
+            exception_message="integer division or modulo by zero",
+            frames=[StackFrame(path="src/tinycalc/evaluate.py", line=27, symbol="evaluate")],
+            tests=["test_divide_by_zero"],
+        )
+        match = compare_signatures(expected, observed_signature(PYTEST_LONG_OUTPUT))
+        assert match.exception == "mismatch"
+        assert match.frames == "unknown"
+        assert verdict_from_match(match) == "different-failure"
 
     def test_an_unrecognized_run_output_does_not_count_against_the_issue(self):
         expected = FailureSignature(exception_type="ValueError", tests=["test_x"])
