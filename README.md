@@ -472,13 +472,49 @@ Four decisions here were measured against Maven 3.9.16 with Surefire
   mean editing the project's own build file, so a Gradle workspace runs the
   whole test task instead. The asymmetry is a measurement, not an oversight.
 
-Run end to end against a real two-class Maven project, `verify --no-docker`
-reports `REPRODUCED` with `exception: match`, `message: exact`, `frames:
-match (quote in Pricing.java)` and `tests: match`. The same project with
-the bug fixed reports `NOT-REPRODUCED`. The equivalent Gradle project
-reports `REPRODUCED` on test names alone, with a note that the issue names
-no exception type, which is Gradle's default output being what it is rather
-than anything the workspace does differently.
+That workspace is not just generated, it is run. `demo.sh` verifies the
+committed `examples/javashop` project end to end, so `mvn test` really
+executes, Surefire really fails, and the failure it prints is compared
+against the one the issue reports:
+
+```
+$ ./demo.sh
+...
+== issue2repro verify: the JVM workspace, actually run ==
+Verification: REPRODUCED (observed by running reproduce.sh on this machine)
+  the run failed the way the issue describes
+  expected (from the issue): java.lang.NullPointerException: Cannot invoke "java.lang.Integer.intValue()" because the return value of "java.util.Map.get(Object)" is null; PricingTest::unknownCouponIsIgnored, ShippingTest::flatRateUnderThreshold, ShippingTest::freeOverFiftyDollars
+  observed (from the run):   java.lang.NullPointerException: Cannot invoke "java.lang.Integer.intValue()" because the return value of "java.util.Map.get(Object)" is null; ShippingTest::flatRateUnderThreshold, ShippingTest::freeOverFiftyDollars, PricingTest::unknownCouponIsIgnored
+  exception: match
+  message:   exact
+  frames:    match (applyCoupon in Pricing.java)
+  tests:     match (PricingTest::unknownCouponIsIgnored, ShippingTest::flatRateUnderThreshold, ShippingTest::freeOverFiftyDollars)
+```
+
+The two signature lines are printed in different orders because they come
+from different places: the expected one from the issue text, the observed
+one from Surefire's class execution order. The comparison is by set, and
+the demo checks the three names individually for that reason rather than
+pinning an order this tool does not control.
+
+With `DEMO_VERIFY_DOCKER=1` the same reproduction runs inside the generated
+image instead, which is what CI's `verify-in-docker` job does. The demo
+asserts which path ran, not only the verdict: every other line it checks is
+identical on both paths, so without that assertion the container job would
+keep passing if the container path stopped being taken. The equivalent
+Gradle project reports `REPRODUCED` on test names alone, with a note that
+the issue names no exception type, which is Gradle's default output being
+what it is rather than anything the workspace does differently.
+
+One consequence of generating no install layer is worth stating, because it
+is the price of that decision. A Python image resolves dependencies in a
+`RUN` layer, so a resolution failure fails `docker build` and is reported as
+an environment failure. A JVM image has no such layer, so Maven resolves
+inside the reproduction step instead. Run with an empty local repository and
+`-o` to force that failure, `verify` reports `UNKNOWN` and exits 2, with
+`no exception line was recognized in the run output`. That is the "could not
+tell" answer rather than the "no" answer, and never a false `REPRODUCED`,
+but it is a less precise label than the Python path gives.
 
 Three ordering rules matter more than the comparison itself:
 
@@ -695,14 +731,24 @@ reproduction would.
   anchors a header at column zero, so no trace is opened for those frames
   to attach to. That was measured on a real `exceptionFormat "full"` run,
   not assumed, and reading it is a ROADMAP item.
-- **A JVM workspace has been run end to end on the host but never inside
-  Docker, and Docker is `verify`'s default.** `verify --no-docker` was
-  measured against real Maven and Gradle projects and is what the section
-  above reports. The Dockerfile's base images were confirmed to exist on
-  Docker Hub, not pulled and built: there is no Docker daemon on the
-  machine this was developed on, and CI's `verify-in-docker` job runs the
-  Python reproduction only. This is the largest untested part of JVM
-  support and it is a ROADMAP item.
+- **A JVM reproduction is verified end to end on both paths, but only the
+  container path is exercised on a machine with Docker, and that machine is
+  CI.** There is no Docker daemon on the machine this is developed on, so
+  the host path is what a change is checked against locally and the
+  container path is checked by CI's `verify-in-docker` job on every push.
+  A `docker build` failure specific to an environment CI does not have
+  would not be caught here.
+- **The host path of the demo needs Maven, and skips if it is missing.**
+  Without `mvn` on PATH and without `DEMO_VERIFY_DOCKER=1`, the JVM
+  workspace is generated and checked but not executed. The demo prints
+  `[SKIPPED]` and says why rather than passing quietly, but a green
+  `./demo.sh` on a machine with no JVM toolchain has checked less than the
+  same command on one that has it.
+- **Only Maven is executed end to end; Gradle is generated and read, not
+  run in the demo.** The Gradle test-name and workspace behavior was
+  measured against a real Gradle 9.7.1 project during development, and
+  fixtures pin its output, but no committed Gradle project is verified by
+  `demo.sh` or CI.
 - **A JVM frame names a file, never a path.** `Pricing.java` carries no
   directory, so mapping it onto a repository file matches on the name
   alone. A project with two files of the same name in different packages

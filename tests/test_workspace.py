@@ -174,6 +174,35 @@ class TestDockerfile:
         analysis, _ = build_analysis(jvm_issue, gradle_repo)
         assert "FROM gradle:8-jdk21" in render_dockerfile(analysis)
 
+    def test_cmd_runs_from_the_directory_reproduce_sh_was_copied_into(
+        self, python_issue, python_repo, node_issue, node_repo, jvm_issue, maven_repo
+    ):
+        """An invariant only the container path can break.
+
+        `CMD ["bash", "reproduce.sh"]` is a relative path, so it resolves
+        against whatever the last WORKDIR left the image in. On the host
+        this cannot go wrong: reproduce.sh is invoked by absolute path and
+        finds its own directory from BASH_SOURCE. In an image, a final
+        WORKDIR that disagrees with the COPY destination means the CMD
+        cannot find the script at all.
+        """
+        for issue, repo in (
+            (python_issue, python_repo),
+            (node_issue, node_repo),
+            (jvm_issue, maven_repo),
+        ):
+            analysis, _ = build_analysis(issue, repo)
+            lines = [line.strip() for line in render_dockerfile(analysis).splitlines()]
+            copied_into = next(
+                line.split()[-1] for line in lines if line.startswith("COPY reproduce.sh")
+            )
+            last_workdir = [line for line in lines if line.startswith("WORKDIR")][-1]
+            assert lines[-1] == 'CMD ["bash", "reproduce.sh"]'
+            # "./" as a COPY destination means the WORKDIR in force at that point.
+            assert copied_into == "./"
+            assert last_workdir == "WORKDIR /repro"
+            assert [line for line in lines if line.startswith("WORKDIR")][0] == "WORKDIR /repro"
+
 
 class TestJvmReproduceSh:
     def test_maven_gets_no_venv_and_runs_from_source(self, jvm_issue, maven_repo):

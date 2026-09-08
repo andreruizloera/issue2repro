@@ -27,14 +27,27 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # The verify parts run on the host by default so the demo works anywhere.
-# Set DEMO_VERIFY_DOCKER=1 to run the first one in a real container instead,
-# which is what CI does. Every line checked below is identical either way.
+# Set DEMO_VERIFY_DOCKER=1 to run them in a real container instead, which is
+# what CI does. Every verdict checked below is identical either way.
 # A plain string, not an array: bash 3.2 (the macOS default) treats an empty
 # array as unbound under `set -u` and kills the script.
 HOST_FLAG="--no-docker"
 if [ "${DEMO_VERIFY_DOCKER:-}" = "1" ]; then
     HOST_FLAG=""
 fi
+
+# Which path a verdict line must name. Without this the container job would
+# pass unchanged if DEMO_VERIFY_DOCKER stopped having any effect, because
+# every other line it checks is the same on both paths: a check that cannot
+# fail. `verify` prints where it ran, so the demo asserts it ran there.
+where_clause() {
+    # where_clause <image tag slug>
+    if [ "${DEMO_VERIFY_DOCKER:-}" = "1" ]; then
+        printf 'observed by running reproduce.sh in Docker (issue2repro-verify:%s)' "$1"
+    else
+        printf 'observed by running reproduce.sh on this machine'
+    fi
+}
 
 FAILURES=0
 
@@ -116,7 +129,7 @@ code=0
     $HOST_FLAG >"$WORK/v1.txt" 2>&1 || code=$?
 sed -n '/^Verification:/,$p' "$WORK/v1.txt"
 check_exit "$code" 0 "verify (reproduced)"
-check "$WORK/v1.txt" "Verification: REPRODUCED"
+check "$WORK/v1.txt" "Verification: REPRODUCED ($(where_clause example-tinycalc-1))"
 check "$WORK/v1.txt" "the run failed the way the issue describes"
 check "$WORK/v1.txt" "exception: match"
 check "$WORK/v1.txt" "message:   exact"
@@ -263,6 +276,41 @@ echo "-- scoped fallback test command"
 tail -n 1 "$WORK/javarepro-scoped/reproduce.sh"
 check "$WORK/javarepro-scoped/reproduce.sh" \
     "mvn -B test -Dtest=PricingTest -Dsurefire.failIfNoSpecifiedTests=false"
+
+# Everything above this line is analysis and generation, which need no JVM
+# toolchain at all. This part EXECUTES the JVM workspace: `mvn test` really
+# runs, Surefire really fails, and the failure it prints is compared against
+# the one the issue reports. On the container path Maven comes from the
+# image, so the host needs nothing but Docker. On the host path it needs a
+# real Maven, which not every machine has, so that case is skipped out loud
+# rather than quietly asserting less than the line above it implies.
+echo
+if [ "${DEMO_VERIFY_DOCKER:-}" = "1" ] || command -v mvn >/dev/null 2>&1; then
+    echo "== issue2repro verify: the JVM workspace, actually run =="
+    code=0
+    "${I2R[@]}" verify "https://github.com/example/javashop/issues/2" \
+        --issue-file "$ROOT/examples/javashop-issue-2.json" \
+        --clone-url "file://$WORK/javashop" \
+        --output "$WORK/javaverify" \
+        $HOST_FLAG >"$WORK/vjvm.txt" 2>&1 || code=$?
+    sed -n '/^Verification:/,$p' "$WORK/vjvm.txt"
+    check_exit "$code" 0 "verify (JVM reproduced)"
+    check "$WORK/vjvm.txt" "Verification: REPRODUCED ($(where_clause example-javashop-2))"
+    check "$WORK/vjvm.txt" "exception: match"
+    check "$WORK/vjvm.txt" "message:   exact"
+    check "$WORK/vjvm.txt" "frames:    match (applyCoupon in Pricing.java)"
+    # Surefire's class order is not something this tool controls, so the
+    # names are checked individually rather than as one ordered line.
+    check "$WORK/vjvm.txt" "tests:     match ("
+    check "$WORK/vjvm.txt" "PricingTest::unknownCouponIsIgnored"
+    check "$WORK/vjvm.txt" "ShippingTest::freeOverFiftyDollars"
+    check "$WORK/vjvm.txt" "ShippingTest::flatRateUnderThreshold"
+else
+    echo "== issue2repro verify: the JVM workspace [SKIPPED] =="
+    echo "   No mvn on PATH and DEMO_VERIFY_DOCKER is not set, so the JVM"
+    echo "   reproduction was generated above but not executed. Install Maven,"
+    echo "   or set DEMO_VERIFY_DOCKER=1 to run it in a container instead."
+fi
 
 echo
 if [ "$FAILURES" -ne 0 ]; then

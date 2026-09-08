@@ -20,17 +20,20 @@ implemented today; the README only documents what works now.
   reproduction. Doing it safely probably means reading the test source
   set to confirm the class exists before adding the filter.
 - Pre-resolve JVM dependencies in a Dockerfile layer, so a rebuild does
-  not re-download them. No install step is generated today, because both
-  build tools resolve inside the task they run and a warm-up goal
-  (`dependency:go-offline`) fails on some real projects.
-- Exercise a JVM workspace through the CONTAINER path in CI. The
-  `verify-in-docker` job runs the Python reproduction only, so the JVM
-  Dockerfile has been read and its base images confirmed to exist on
-  Docker Hub, but never built. Docker is the default for `verify`, so
-  this is the largest untested part of JVM support. It is not done today
-  because pulling `maven:3.9-eclipse-temurin-21` and resolving JUnit from
-  Maven Central inside the container makes a slow job with a network
-  dependency the rest of the suite does not have.
+  not re-download them, and so a resolution failure lands in `docker
+  build` where it is reported as an environment failure. Today it lands
+  inside the reproduction step, where the honest verdict is `unknown`
+  rather than the more precise `environment-failure` the Python path
+  gives. No install step is generated because both build tools resolve
+  inside the task they run and a warm-up goal (`dependency:go-offline`)
+  fails on some real projects.
+- Verify a committed GRADLE workspace end to end. The Maven one now runs
+  in `demo.sh` on both the host and the container path, but Gradle is
+  still only generated and read: its behavior was measured against a real
+  Gradle 9.7.1 project during development and fixtures pin the output,
+  and nothing in CI executes it. A wrapper project also has to commit the
+  wrapper JAR for the container path to work, which is a fixture question
+  before it is a code question.
 - Read a Go `t.Errorf` location (`tax_test.go:7: got 107, want 110`) as a
   failure location. It is deliberately not read as a frame today because
   the pattern is close to ordinary prose; doing it safely probably means
