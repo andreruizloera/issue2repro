@@ -695,13 +695,14 @@ reproduction would.
   anchors a header at column zero, so no trace is opened for those frames
   to attach to. That was measured on a real `exceptionFormat "full"` run,
   not assumed, and reading it is a ROADMAP item.
-- **A JVM workspace has been run end to end on this machine but never
-  inside Docker.** `verify --no-docker` was measured against real Maven and
-  Gradle projects and is what the section above reports. The Dockerfile's
-  base images were checked to exist on Docker Hub, not pulled and built,
-  because there is no Docker daemon on the machine this was developed on.
-  That is true of the Python and Node bases as well and is not new here,
-  but it is worth stating beside a base image that carries a build tool.
+- **A JVM workspace has been run end to end on the host but never inside
+  Docker, and Docker is `verify`'s default.** `verify --no-docker` was
+  measured against real Maven and Gradle projects and is what the section
+  above reports. The Dockerfile's base images were confirmed to exist on
+  Docker Hub, not pulled and built: there is no Docker daemon on the
+  machine this was developed on, and CI's `verify-in-docker` job runs the
+  Python reproduction only. This is the largest untested part of JVM
+  support and it is a ROADMAP item.
 - **A JVM frame names a file, never a path.** `Pricing.java` carries no
   directory, so mapping it onto a repository file matches on the name
   alone. A project with two files of the same name in different packages

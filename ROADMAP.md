@@ -23,6 +23,14 @@ implemented today; the README only documents what works now.
   not re-download them. No install step is generated today, because both
   build tools resolve inside the task they run and a warm-up goal
   (`dependency:go-offline`) fails on some real projects.
+- Exercise a JVM workspace through the CONTAINER path in CI. The
+  `verify-in-docker` job runs the Python reproduction only, so the JVM
+  Dockerfile has been read and its base images confirmed to exist on
+  Docker Hub, but never built. Docker is the default for `verify`, so
+  this is the largest untested part of JVM support. It is not done today
+  because pulling `maven:3.9-eclipse-temurin-21` and resolving JUnit from
+  Maven Central inside the container makes a slow job with a network
+  dependency the rest of the suite does not have.
 - Read a Go `t.Errorf` location (`tax_test.go:7: got 107, want 110`) as a
   failure location. It is deliberately not read as a frame today because
   the pattern is close to ordinary prose; doing it safely probably means
