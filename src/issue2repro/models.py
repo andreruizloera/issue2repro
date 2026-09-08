@@ -75,11 +75,14 @@ class Signals:
 class ProjectInfo:
     """What we inferred from the cloned repository itself."""
 
-    language: str | None = None  # "python", "node", or None
+    language: str | None = None  # "python", "node", "jvm", or None
     manifests: list[str] = field(default_factory=list)
     install_commands: list[str] = field(default_factory=list)
     test_command: str | None = None
     build_command: str | None = None
+    # Which build tool drives a "jvm" project: "maven" or "gradle". None for
+    # every other language, where the language already names the tool.
+    build_tool: str | None = None
 
 
 @dataclass

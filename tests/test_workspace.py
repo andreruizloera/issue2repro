@@ -158,6 +158,64 @@ class TestDockerfile:
         assert "FROM debian:bookworm-slim" in dockerfile
         assert "no install steps inferred" in dockerfile
 
+    def test_maven_base_carries_the_build_tool(self, jvm_issue, maven_repo):
+        analysis, _ = build_analysis(jvm_issue, maven_repo)
+        dockerfile = render_dockerfile(analysis)
+        assert "FROM maven:3.9-eclipse-temurin-21" in dockerfile
+        assert "RUN " not in dockerfile
+
+    def test_gradle_wrapper_needs_only_a_jdk(self, jvm_issue, gradle_repo):
+        """The committed wrapper pins and downloads its own Gradle."""
+        analysis, _ = build_analysis(jvm_issue, gradle_repo)
+        assert "FROM eclipse-temurin:21-jdk" in render_dockerfile(analysis)
+
+    def test_gradle_without_wrapper_needs_gradle_in_the_image(self, jvm_issue, gradle_repo):
+        (gradle_repo / "gradlew").unlink()
+        analysis, _ = build_analysis(jvm_issue, gradle_repo)
+        assert "FROM gradle:8-jdk21" in render_dockerfile(analysis)
+
+
+class TestJvmReproduceSh:
+    def test_maven_gets_no_venv_and_runs_from_source(self, jvm_issue, maven_repo):
+        analysis, mapped = build_analysis(jvm_issue, maven_repo)
+        script = render_reproduce_sh(analysis, mapped)
+        assert "venv" not in script
+        assert 'cd "$WORKSPACE/source"' in script
+
+    def test_fallback_scopes_maven_to_the_implicated_test_class(self, jvm_issue, maven_repo):
+        analysis, mapped = build_analysis(jvm_issue, maven_repo)
+        analysis.signals.commands = []
+        script = render_reproduce_sh(analysis, mapped)
+        assert "mvn -B test -Dtest=ShippingTest" in script
+        # the library class the trace also implicates is not a test filter
+        assert "Pricing" not in script
+
+    def test_scoped_maven_command_carries_the_no_match_guard(self, jvm_issue, maven_repo):
+        """Without it, a scope guess that matches nothing aborts the build,
+        and verify would read that nonzero exit as a reproduction. The flag
+        every tutorial names, -DfailIfNoTests=false, is silently ignored by
+        Surefire 3.x and is deliberately not the one used."""
+        analysis, mapped = build_analysis(jvm_issue, maven_repo)
+        analysis.signals.commands = []
+        script = render_reproduce_sh(analysis, mapped)
+        assert "-Dsurefire.failIfNoSpecifiedTests=false" in script
+        assert "-DfailIfNoTests=false" not in script
+
+    def test_gradle_is_deliberately_not_scoped(self, jvm_issue, gradle_repo):
+        """Gradle fails a --tests filter that matches nothing and offers no
+        command-line way to disable that, so scoping it could turn a bad
+        guess into a wrong verdict rather than a missing one."""
+        analysis, mapped = build_analysis(jvm_issue, gradle_repo)
+        analysis.signals.commands = []
+        script = render_reproduce_sh(analysis, mapped)
+        assert script.rstrip().endswith("./gradlew --no-daemon test")
+        assert "--tests" not in script
+
+    def test_a_jvm_test_command_is_a_repro_step_not_setup(self):
+        assert classify_step("mvn -B test") == "repro"
+        assert classify_step("./gradlew --no-daemon test") == "repro"
+        assert classify_step("gradle --no-daemon test") == "repro"
+
 
 class TestIssueMd:
     def test_contains_title_body_comments_and_link(self, python_issue, python_repo):
@@ -182,6 +240,28 @@ class TestWriteWorkspace:
         text = render_dockerignore()
         assert ".venv/" in text
         assert "verify.log" in text
+
+    def test_dockerignore_excludes_jvm_output_only_for_jvm_projects(
+        self, jvm_issue, maven_repo, python_issue, python_repo
+    ):
+        """`build/` is a plausible name for a tracked directory, so it is
+        excluded where it is the build output by convention and nowhere else."""
+        jvm_analysis, _ = build_analysis(jvm_issue, maven_repo)
+        jvm_text = render_dockerignore(jvm_analysis)
+        assert "**/target/" in jvm_text
+        assert "**/build/" in jvm_text
+        assert "**/.gradle/" in jvm_text
+
+        py_analysis, _ = build_analysis(python_issue, python_repo)
+        assert "**/build/" not in render_dockerignore(py_analysis)
+
+    def test_jvm_metadata_records_the_build_tool(self, jvm_issue, maven_repo, tmp_path):
+        analysis, mapped = build_analysis(jvm_issue, maven_repo)
+        write_workspace(analysis, mapped, tmp_path / "repro")
+        meta = json.loads((tmp_path / "repro" / "metadata.json").read_text())
+        assert meta["project"]["language"] == "jvm"
+        assert meta["project"]["build_tool"] == "maven"
+        assert meta["project"]["test_command"] == "mvn -B test"
 
     def test_metadata_records_the_step_plan(self, python_issue, python_repo, tmp_path):
         analysis, mapped = build_analysis(python_issue, python_repo)

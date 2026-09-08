@@ -46,6 +46,16 @@ def rust_issue() -> Issue:
     return load_fixture("rust_issue.json")
 
 
+@pytest.fixture
+def jvm_issue() -> Issue:
+    """A Maven Surefire failure block, captured verbatim from a real run.
+
+    Apache Maven 3.9.16 with Surefire 3.5.4 on OpenJDK 26, against the same
+    two-class project shape the `maven_repo` and `gradle_repo` fixtures build.
+    """
+    return load_fixture("jvm_issue.json")
+
+
 def load_output(name: str) -> str:
     """Raw runner output, kept verbatim in a file rather than inlined.
 
@@ -260,4 +270,52 @@ def node_repo(tmp_path: Path) -> Path:
     )
     (root / "src" / "config.js").write_text("module.exports = {};\n")
     (root / "src" / "index.js").write_text("require('./config');\n")
+    return root
+
+
+def _jvm_sources(root: Path) -> None:
+    """The standard Maven/Gradle layout, shared by both JVM repo fixtures.
+
+    Mirrors the shape of the real projects the JVM commands were measured
+    against: one library class and one test class that exercises it.
+    """
+    main = root / "src" / "main" / "java" / "com" / "example"
+    test = root / "src" / "test" / "java" / "com" / "example"
+    main.mkdir(parents=True)
+    test.mkdir(parents=True)
+    (main / "Pricing.java").write_text(
+        "package com.example;\n\npublic class Pricing {\n}\n",
+    )
+    (test / "ShippingTest.java").write_text(
+        "package com.example;\n\nclass ShippingTest {\n}\n",
+    )
+
+
+@pytest.fixture
+def maven_repo(tmp_path: Path) -> Path:
+    """A minimal Maven project."""
+    root = tmp_path / "mavenrepo"
+    root.mkdir()
+    (root / "pom.xml").write_text(
+        '<project xmlns="http://maven.apache.org/POM/4.0.0">\n'
+        "  <modelVersion>4.0.0</modelVersion>\n"
+        "  <groupId>com.example</groupId>\n"
+        "  <artifactId>shipping</artifactId>\n"
+        "  <version>1.0.0</version>\n"
+        "</project>\n"
+    )
+    _jvm_sources(root)
+    return root
+
+
+@pytest.fixture
+def gradle_repo(tmp_path: Path) -> Path:
+    """A minimal Gradle project with a committed wrapper."""
+    root = tmp_path / "gradlerepo"
+    root.mkdir()
+    (root / "build.gradle").write_text("plugins {\n    id 'java'\n}\n")
+    (root / "settings.gradle").write_text("rootProject.name = 'shipping'\n")
+    (root / "gradlew").write_text('#!/bin/sh\nexec gradle "$@"\n')
+    (root / "gradlew").chmod(0o755)
+    _jvm_sources(root)
     return root

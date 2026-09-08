@@ -200,12 +200,11 @@ check "$WORK/goshop.txt" "[25/25] stack trace: go stack trace maps to existing f
 check "$WORK/goshop.txt" "Language: unknown"
 check "$WORK/goshop.txt" "Reproduction confidence: 60% inferred"
 
-# A Java bug report, whose trace carries a `Caused by:` chain. Same shape as
-# the Go part: the JVM exception is read and its frames map onto real files,
-# while the language and test command stay honestly undetected. The two
-# checked trace lines are the point, because the rethrown
-# IllegalStateException is the handler and the NullPointerException under it
-# is the bug.
+# A Java bug report, whose trace carries a `Caused by:` chain. The two checked
+# trace lines are the point, because the rethrown IllegalStateException is the
+# handler and the NullPointerException under it is the bug. Unlike the Go part
+# above, this repository IS detected: its pom.xml gives a language, a test
+# command, and a build command, which is what takes it to 100%.
 cp -R "$ROOT/examples/javashop" "$WORK/javashop"
 git -C "$WORK/javashop" init --quiet
 git -C "$WORK/javashop" add --all
@@ -220,8 +219,10 @@ echo "== issue2repro inspect: a JVM exception chain, read from the issue =="
 check "$WORK/javashop.txt" "  stack trace: jvm, 2 frame(s) (java.lang.IllegalStateException: checkout failed)"
 check "$WORK/javashop.txt" "  stack trace: jvm, 2 frame(s) (java.lang.NullPointerException: Cannot invoke"
 check "$WORK/javashop.txt" "[25/25] stack trace: jvm stack trace maps to existing file(s): src/main/java/com/example/shop/Service.java, src/main/java/com/example/shop/Pricing.java"
-check "$WORK/javashop.txt" "Language: unknown"
-check "$WORK/javashop.txt" "Reproduction confidence: 60% inferred"
+check "$WORK/javashop.txt" "Language: jvm (pom.xml)"
+check "$WORK/javashop.txt" "Test command: mvn -B test"
+check "$WORK/javashop.txt" "Build command: mvn -B -DskipTests package"
+check "$WORK/javashop.txt" "Reproduction confidence: 100% inferred"
 
 # The same repository, reported the way most JVM projects actually fail: the
 # reporter pasted a `mvn test` build log rather than a hand-run java command.
@@ -238,6 +239,30 @@ echo "== issue2repro inspect: a Maven Surefire build log, read from the issue ==
 check "$WORK/javashop-mvn.txt" "  failing tests named: PricingTest::unknownCouponIsIgnored, ShippingTest::flatRateUnderThreshold, ShippingTest::freeOverFiftyDollars"
 check "$WORK/javashop-mvn.txt" "  stack trace: jvm, 2 frame(s) (java.lang.NullPointerException: Cannot invoke"
 check "$WORK/javashop-mvn.txt" "[25/25] stack trace: jvm stack trace maps to existing file(s): src/main/java/com/example/shop/Pricing.java, src/test/java/com/example/shop/PricingTest.java"
+
+# The workspace that same report now generates. The Dockerfile carries a base
+# image with Maven on it, and the fallback test command is scoped to the test
+# class the trace implicates, with the guard that keeps a filter matching
+# nothing from failing the build and reading as a reproduction.
+echo
+echo "== issue2repro build: the JVM workspace =="
+"${I2R[@]}" build "https://github.com/example/javashop/issues/2" \
+    --issue-file "$ROOT/examples/javashop-issue-2.json" \
+    --clone-url "file://$WORK/javashop" \
+    --output "$WORK/javarepro" >/dev/null
+
+echo "-- Dockerfile"
+cat "$WORK/javarepro/Dockerfile"
+check "$WORK/javarepro/Dockerfile" "FROM maven:3.9-eclipse-temurin-21"
+
+echo "-- scoped fallback test command"
+"${I2R[@]}" build "https://github.com/example/javashop/issues/3" \
+    --issue-file "$ROOT/examples/javashop-issue-3.json" \
+    --clone-url "file://$WORK/javashop" \
+    --output "$WORK/javarepro-scoped" >/dev/null
+tail -n 1 "$WORK/javarepro-scoped/reproduce.sh"
+check "$WORK/javarepro-scoped/reproduce.sh" \
+    "mvn -B test -Dtest=PricingTest -Dsurefire.failIfNoSpecifiedTests=false"
 
 echo
 if [ "$FAILURES" -ne 0 ]; then

@@ -1,0 +1,9 @@
+{
+  "title": "Pricing.quote throws NullPointerException for an unknown currency",
+  "body": "Quoting a shipping price in a currency that is not in the rate table throws instead of reporting the missing rate.\n\n```\n$ mvn -B test\n[INFO] Running com.example.ShippingTest\n[ERROR] Tests run: 2, Failures: 0, Errors: 1, Skipped: 0, Time elapsed: 0.058 s <<< FAILURE! -- in com.example.ShippingTest\n[ERROR] com.example.ShippingTest.quotesInAnUnknownCurrency -- Time elapsed: 0.006 s <<< ERROR!\njava.lang.NullPointerException: Cannot invoke \"java.lang.Double.doubleValue()\" because the return value of \"java.util.Map.get(Object)\" is null\n\tat com.example.Pricing.quote(Pricing.java:13)\n\tat com.example.ShippingTest.quotesInAnUnknownCurrency(ShippingTest.java:18)\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:565)\n\tat java.base/java.util.ArrayList.forEach(ArrayList.java:1612)\n\tat java.base/java.util.ArrayList.forEach(ArrayList.java:1612)\n```\n",
+  "comments": [
+    {
+      "body": "Confirmed on main. `mvn -B test -Dtest=ShippingTest` is enough to show it."
+    }
+  ]
+}

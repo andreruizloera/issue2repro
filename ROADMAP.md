@@ -6,18 +6,23 @@ implemented today; the README only documents what works now.
 ## More ecosystems
 
 - Rust (Cargo.toml, `cargo test`), Go (go.mod, `go test ./...`), Ruby
-  (Gemfile, `rake test` / `rspec`), Java (pom.xml / build.gradle). This
-  is about DETECTING the project and building its environment: Go and
-  Rust stack traces are already read out of issue text, but a Go or Rust
-  repository is still not detected, gets no Dockerfile, and gets no test
-  command inferred for it.
+  (Gemfile, `rake test` / `rspec`). This is about DETECTING the project
+  and building its environment: Go and Rust stack traces are already read
+  out of issue text, but a Go or Rust repository is still not detected,
+  gets no Dockerfile, and gets no test command inferred for it. JVM
+  detection shipped, for Maven and Gradle.
 - Recognize the stack trace formats still unread: Ruby backtraces, and C
   or C++ backtraces that were symbolized. JVM frames shipped.
-- Read Maven Surefire and Gradle failure summaries for JVM test names.
-  Only the JUnit console launcher's `Failures (N):` block is read today,
-  because that is the one whose output could be captured here, and every
-  pattern in this parser is written against a real run rather than from
-  memory.
+- Scope a Gradle workspace's fallback test command to the implicated test
+  class. Maven is scoped today and Gradle deliberately is not, because a
+  `--tests` filter matching nothing fails the build and Gradle offers no
+  command-line way to disable that, so a bad guess would read as a
+  reproduction. Doing it safely probably means reading the test source
+  set to confirm the class exists before adding the filter.
+- Pre-resolve JVM dependencies in a Dockerfile layer, so a rebuild does
+  not re-download them. No install step is generated today, because both
+  build tools resolve inside the task they run and a warm-up goal
+  (`dependency:go-offline`) fails on some real projects.
 - Read a Go `t.Errorf` location (`tax_test.go:7: got 107, want 110`) as a
   failure location. It is deliberately not read as a frame today because
   the pattern is close to ordinary prose; doing it safely probably means
