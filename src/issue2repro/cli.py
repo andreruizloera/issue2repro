@@ -21,6 +21,7 @@ from issue2repro.github import (
     parse_issue_url,
 )
 from issue2repro.models import Analysis, Issue
+from issue2repro.signature import expected_signature
 from issue2repro.verify import (
     DEFAULT_TIMEOUT,
     EXIT_CODES,
@@ -74,6 +75,12 @@ def _print_analysis(analysis: Analysis) -> None:
         print("  stack traces: none")
     if signals.filenames:
         print(f"  filenames mentioned: {', '.join(signals.filenames[:8])}")
+    # The failing tests the issue names, from whichever runner's output the
+    # reporter pasted. This is the same reading `verify` compares against,
+    # surfaced here so it is visible without running the reproduction.
+    named_tests = expected_signature(signals, issue.full_text).tests
+    if named_tests:
+        print(f"  failing tests named: {', '.join(named_tests[:8])}")
     print()
     print(f"Reproduction confidence: {analysis.confidence.score}% inferred")
     for c in analysis.confidence.components:

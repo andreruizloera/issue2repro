@@ -81,6 +81,56 @@ _NODE_TAP_FAIL = re.compile(r"^\s*not ok \d+ - (?P<name>.+?)\s*$")
 _JUNIT_FAIL = re.compile(
     r"^\s+JUnit \w+:(?P<cls>[\w.$]+):(?P<name>[\w$]+)\((?P<params>[^)]*)\)\s*$"
 )
+# Maven Surefire, which prints a line per failing test:
+#   "[ERROR] com.example.shop.PricingTest.unknownCouponIsIgnored -- Time
+#    elapsed: 0.003 s <<< ERROR!"
+#   "[ERROR] com.example.shop.ShippingTest.flatRateUnderThreshold(int)[1]
+#    -- Time elapsed: 0.067 s <<< FAILURE!"
+# Surefire calls an assertion failure FAILURE and any other exception ERROR;
+# both are failing tests here. The parameter signature and the parametrized
+# index are dropped so the id reduces to a bare method name the way every
+# other runner's does.
+#
+# THE CLASS-LEVEL LINE IS THE HAZARD and it is why " -- " is in the pattern
+# rather than just "Time elapsed". Surefire prints
+#   "[ERROR] Tests run: 3, Failures: 3, ..., Time elapsed: 0.182 s <<<
+#    FAILURE! -- in com.example.shop.ShippingTest"
+# for the class as a whole, which also ends in "<<< FAILURE!" and would
+# otherwise be recorded as a test named after a count. It is excluded twice
+# over: it separates the name from "Time elapsed" with a comma rather than
+# " -- ", and "Tests run: 3" is not a dotted Java identifier.
+_SUREFIRE_FAIL = re.compile(
+    r"^\[ERROR\]\s+(?P<cls>[\w$.]+)\.(?P<name>[\w$]+)"
+    r"(?:\([^)]*\))?(?:\[[^\]]*\])?"
+    r"\s+--\s+Time elapsed:.*<<<\s+(?:FAILURE|ERROR)!\s*$"
+)
+# Surefire's end-of-run summary, which repeats each failure more compactly:
+#   "[ERROR]   ShippingTest.freeOverFiftyDollars:13 expected: <0> but was: <599>"
+#   "[ERROR]   PricingTest.unknownCouponIsIgnored:22 » NullPointer Cannot ..."
+# This is redundant with the per-test lines in a full log and is read anyway
+# because an issue reporter usually pastes the TAIL of a failed build, which
+# is this block and not the per-test lines hundreds of lines above it. Both
+# forms reduce to the same id, so a full log dedups to one entry.
+_SUREFIRE_SUMMARY_FAIL = re.compile(
+    r"^\[ERROR\]\s+(?P<cls>[\w$]+)\.(?P<name>[\w$]+)"
+    r"(?:\([^)]*\))?(?:\[[^\]]*\])?:\d+\s+\S"
+)
+# Gradle prints "Class > method() FAILED", and nests deeper for @Nested
+# classes and for a parametrized case's display name:
+#   "PricingTest > unknownCouponIsIgnored() FAILED"
+#   "ShippingTest > flatRateUnderThreshold(int) > [1] 100 FAILED"
+# Parsed by splitting on " > " rather than with one regex, because the
+# method is not at a fixed depth: see _gradle_test_id.
+_GRADLE_FAILED = re.compile(r"^(?P<body>\S.*?)\s+FAILED\s*$")
+_GRADLE_METHOD = re.compile(r"^(?P<name>[\w$]+)\([^)]*\)$")
+# The line Gradle indents under a failing test, which carries the exception
+# type and a location but no message and no stack:
+#   "    java.lang.NullPointerException at PricingTest.java:22"
+# Read only when it directly follows a Gradle FAILED line, because on its
+# own this shape is close to prose.
+_GRADLE_EXC = re.compile(
+    rf"^\s+(?P<type>[A-Za-z_][\w.]*{_EXC_SUFFIXES})\s+at\s+[\w$.]+\.\w+:\d+\s*$"
+)
 _NODE_SPEC_FAIL = re.compile(r"^\s*[✖✗×]\s+(?P<name>.+?)\s*\([\d.]+m?s\)\s*$")
 # A TAP line can announce a skipped or planned test rather than a failure.
 _TAP_DIRECTIVE = re.compile(r"#\s*(SKIP|TODO)\b", re.IGNORECASE)
@@ -141,19 +191,84 @@ def _unittest_id(name: str, context: str | None) -> str:
     return f"{context}::{name}" if context else name
 
 
+def _gradle_test_id(line: str) -> str | None:
+    """'ShippingTest > flatRateUnderThreshold(int) > [1] 100 FAILED' -> id.
+
+    Gradle does not put the method at a fixed depth. A plain test is
+    ``Class > method()``, a parametrized case appends the display name as a
+    third segment (``> [1] 100``), and an ``@Nested`` class adds one segment
+    per level. So the segments are scanned for the LAST one shaped like a
+    method, which is the only segment that carries parentheses, and the
+    segment before it is the class.
+
+    Returning None for a line with no method-shaped segment is what keeps
+    Gradle's own progress output from being read as a test: ``> Task :test
+    FAILED`` ends in FAILED too, and has no parenthesized segment.
+    """
+    failed = _GRADLE_FAILED.match(line)
+    if not failed:
+        return None
+    segments = [part.strip() for part in failed["body"].split(" > ")]
+    for index in range(len(segments) - 1, -1, -1):
+        method = _GRADLE_METHOD.match(segments[index])
+        if not method:
+            continue
+        if index == 0:
+            return method["name"]
+        return f"{segments[index - 1]}::{method['name']}"
+    return None
+
+
+def gradle_exception(output: str) -> tuple[str, None] | None:
+    """The exception type Gradle names under a failing test, if any.
+
+    Gradle's default test output prints no stack trace at all. It prints
+    one indented line per failure carrying the type and a source location:
+    ``java.lang.NullPointerException at PricingTest.java:22``. That line is
+    invisible to the general exception scanner, which requires the type to
+    end the line or be followed by ``: message``, so without this a Gradle
+    run produces a completely empty signature.
+
+    Only the type is returned. Gradle prints no message, and the message is
+    left None rather than filled in from the location, so the comparison
+    reports ``unknown`` for it instead of a wrong answer. The location is
+    deliberately NOT turned into a frame: it names no symbol, which is the
+    same reason a Rust panic without ``RUST_BACKTRACE`` compares as unknown.
+
+    The anchor is position, not shape: the line must directly follow a
+    Gradle FAILED line.
+    """
+    lines = output.splitlines()
+    for index, line in enumerate(lines[:-1]):
+        if _gradle_test_id(line) is None:
+            continue
+        found = _GRADLE_EXC.match(lines[index + 1])
+        if found:
+            return found["type"], None
+    return None
+
+
 def runner_tests(text: str) -> tuple[list[str], str | None]:
     """Failing test names printed by a runner other than pytest.
 
-    unittest, go test, cargo test, node --test, and the JUnit console
-    launcher each report failures in their own format. One run means one
-    runner, so the first format that matches anything wins rather than
-    merging two runners' names.
+    unittest, go test, cargo test, node --test, the JUnit console launcher,
+    Maven Surefire, and Gradle each report failures in their own format. One
+    run means one runner, so the first format that matches anything wins
+    rather than merging two runners' names.
+
+    The three JVM formats all record a test as ``Class::method`` with the
+    SIMPLE class name, even though Surefire prints a fully qualified one.
+    That is deliberate: the same failure pasted from any of the three then
+    reduces to the same id, so an issue quoting a Gradle log still compares
+    against a run driven by Surefire.
     """
     unittest_names: list[str] = []
     go_names: list[str] = []
     cargo_names: list[str] = []
     node_names: list[str] = []
     junit_names: list[str] = []
+    surefire_names: list[str] = []
+    gradle_names: list[str] = []
     for raw in text.splitlines():
         line = raw.rstrip()
         found = _UNITTEST_FAIL.match(line)
@@ -175,6 +290,17 @@ def runner_tests(text: str) -> tuple[list[str], str | None]:
             # reduces for comparison.
             junit_names.append(f"{found['cls']}::{found['name']}")
             continue
+        found = _SUREFIRE_FAIL.match(line) or _SUREFIRE_SUMMARY_FAIL.match(line)
+        if found:
+            # Surefire's per-test line is fully qualified and its summary
+            # line is not; recording the simple name collapses the two.
+            simple = found["cls"].rsplit(".", 1)[-1]
+            surefire_names.append(f"{simple}::{found['name']}")
+            continue
+        gradle_id = _gradle_test_id(line)
+        if gradle_id:
+            gradle_names.append(gradle_id)
+            continue
         found = _NODE_TAP_FAIL.match(line) or _NODE_SPEC_FAIL.match(line)
         if found and not _TAP_DIRECTIVE.search(line):
             node_names.append(found["name"])
@@ -183,6 +309,8 @@ def runner_tests(text: str) -> tuple[list[str], str | None]:
         (go_names, "go test failure lines"),
         (cargo_names, "cargo test failure lines"),
         (junit_names, "JUnit failure lines"),
+        (surefire_names, "Maven Surefire failure lines"),
+        (gradle_names, "Gradle failure lines"),
         (node_names, "node --test failure lines"),
     ):
         unique = list(dict.fromkeys(names))
@@ -439,6 +567,15 @@ def observed_signature(output: str, expect_type: str | None = None) -> FailureSi
                 source = f"{_trace_source(trace.language)} line in the output"
                 if source not in signature.sources:
                     signature.sources.append(source)
+
+    if full is None:
+        # Gradle is the one supported runner that prints no stack trace by
+        # default, so neither the line scanner nor the extractors above find
+        # anything in it. Its own failure line carries the type.
+        gradle = gradle_exception(output)
+        if gradle:
+            full = gradle
+            signature.sources.append("Gradle failure line in the output")
 
     tests: list[str] = []
     truncated_detail: tuple[str, str | None] | None = None

@@ -357,11 +357,32 @@ Three things about the JVM changed the design:
   only thing separating it from prose, which is why a frame is taken only
   when it names a real JVM source file and line.
 
-Failing test names are read from the JUnit console launcher's
-`Failures (N):` block. Maven Surefire and Gradle report failures in their
-own formats and are **not** read; neither was available to capture output
-from here, and writing those patterns from memory is what the rest of this
-parser deliberately avoids.
+Failing test names are read from three JVM tools: the JUnit console
+launcher's `Failures (N):` block, Maven Surefire, and Gradle. All three
+record a test as `Class::method` with the simple class name, even though
+Surefire prints a fully qualified one, so an issue quoting a Gradle log
+still compares against a run driven by Surefire.
+
+Each of the two build tools has one line that looks like a failing test
+and is not, and both were found by reading real output rather than
+guessed at. Surefire announces every class with `Tests run: 3, Failures:
+3, ..., Time elapsed: 0.182 s <<< FAILURE! -- in
+com.example.shop.ShippingTest`, which ends exactly like the per-test
+lines; reading it would report a test named after a count. Gradle's
+`> Task :test FAILED` ends in `FAILED` exactly like a test line. Surefire
+also prints each failure twice, once per test and once in the end-of-run
+`Failures:`/`Errors:` summary, and both forms are read on purpose,
+because an issue reporter usually pastes the tail of a build rather than
+the whole log. The two reduce to the same id, so a full log does not
+double count.
+
+**Gradle prints no stack trace by default**, only one indented line per
+failure carrying a type and a location: `java.lang.NullPointerException
+at PricingTest.java:22`. So a Gradle run yields a test name and an
+exception type, and no message and no frames. The message is left
+`unknown` rather than invented, and the location is deliberately not
+turned into a frame, because it names no symbol, which is the same reason
+a Rust panic without `RUST_BACKTRACE` compares as `unknown`.
 
 Three ordering rules matter more than the comparison itself:
 
@@ -550,19 +571,30 @@ reproduction would.
   a sharper answer when the reporter pasted a traceback, never a stricter
   one when they did not.
 - Failing test names are read from pytest, `unittest`, `go test`,
-  `cargo test`, `node --test`, and the JUnit console launcher. Frames are
-  read from pytest, plain Python tracebacks, Node stacks, Go panics, Rust
-  panics, and JVM exceptions. Ruby, and C and C++ with a symbolized
-  backtrace, still produce `unknown` frames. For those, be aware that the
-  exception line is only read when it sits at the start of a line with a
-  conventional type suffix, so a runtime that decorates its header may
-  produce no signature at all rather than a partial one.
-- **Only the JUnit console launcher's format is read on the JVM.** Maven
-  Surefire and Gradle print their own failure summaries and are not
-  parsed; neither was available to capture real output from, and every
-  pattern in this parser was written against output actually captured from
-  a running toolchain. A Surefire run still gets its frames and exception
-  read from the stack trace it prints, but not its test names.
+  `cargo test`, `node --test`, the JUnit console launcher, Maven Surefire,
+  and Gradle. Frames are read from pytest, plain Python tracebacks, Node
+  stacks, Go panics, Rust panics, and JVM exceptions. Ruby, and C and C++
+  with a symbolized backtrace, still produce `unknown` frames. For those,
+  be aware that the exception line is only read when it sits at the start
+  of a line with a conventional type suffix, so a runtime that decorates
+  its header may produce no signature at all rather than a partial one.
+- **A Gradle run carries no frames and no exception message**, because
+  Gradle's default test output prints neither. It yields a test name and
+  an exception type only, so a Gradle-to-Gradle comparison decides on
+  those two and reports `unknown` for the other two rather than guessing.
+  A project that configures `testLogging { exceptionFormat "full" }` does
+  print a real stack trace, and its exception type and message are then
+  read from it, but **its frames are still not**: Gradle indents the
+  exception header under the `FAILED` line, and the JVM trace extractor
+  anchors a header at column zero, so no trace is opened for those frames
+  to attach to. That was measured on a real `exceptionFormat "full"` run,
+  not assumed, and reading it is a ROADMAP item.
+- **Java and Kotlin repositories still get no generated workspace.**
+  Reading Surefire and Gradle improves the signature on both sides of the
+  comparison, but workspace generation is Python and Node only, so a JVM
+  repository is still `Language: unknown` with no Dockerfile and `verify`
+  cannot run its build. The reading is what shipped here; the workspace is
+  not, and it is a ROADMAP item.
 - **A JVM frame names a file, never a path.** `Pricing.java` carries no
   directory, so mapping it onto a repository file matches on the name
   alone. A project with two files of the same name in different packages

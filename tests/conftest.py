@@ -96,6 +96,45 @@ def jvm_junit_assertion() -> str:
 
 
 @pytest.fixture
+def jvm_maven_surefire() -> str:
+    """Real `mvn test` output under Maven 3.9.16, Surefire 3.5.2, OpenJDK 26.
+
+    Carries every Surefire shape that matters at once: an assertion
+    `FAILURE!`, an exception `ERROR!`, a parametrized case printed twice
+    with `(int)[1]` and `(int)[2]`, the end-of-run `Failures:`/`Errors:`
+    summary block, and the class-level `Tests run: 3, ... <<< FAILURE! --
+    in com.example.shop.ShippingTest` line that must NOT be read as a test.
+    """
+    return load_output("jvm_maven_surefire.txt")
+
+
+@pytest.fixture
+def jvm_gradle_test() -> str:
+    """Real `gradle test --console=plain` output under Gradle 9.7.1.
+
+    Captured with NO `testLogging` block configured, which is how most
+    projects run, to confirm Gradle reports failing tests by default.
+    Gradle prints no stack trace here, only one indented type-and-location
+    line per failure, which is why this output produced a completely empty
+    signature before Gradle was parsed.
+    """
+    return load_output("jvm_gradle_test.txt")
+
+
+@pytest.fixture
+def jvm_gradle_full_exception() -> str:
+    """Real `gradle test` output with `testLogging { exceptionFormat "full" }`.
+
+    Captured to settle what that setting actually buys, rather than
+    assuming it. It does print a full stack trace, so the exception type
+    and message become readable, but the frames still are not: Gradle
+    indents the exception header under the FAILED line and the JVM trace
+    extractor anchors a header at column zero.
+    """
+    return load_output("jvm_gradle_full_exception.txt")
+
+
+@pytest.fixture
 def python_repo(tmp_path: Path) -> Path:
     """A minimal Python project matching the python_issue fixture."""
     root = tmp_path / "pyrepo"

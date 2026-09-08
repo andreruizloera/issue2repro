@@ -1,0 +1,36 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.7.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :compileJava
+> Task :processResources NO-SOURCE
+> Task :classes
+> Task :compileTestJava
+> Task :processTestResources NO-SOURCE
+> Task :testClasses
+
+> Task :test FAILED
+
+PricingTest > unknownCouponIsIgnored() FAILED
+    java.lang.NullPointerException at PricingTest.java:22
+
+ShippingTest > flatRateUnderThreshold(int) > [1] 100 FAILED
+    org.opentest4j.AssertionFailedError at ShippingTest.java:19
+
+ShippingTest > flatRateUnderThreshold(int) > [2] 200 FAILED
+    org.opentest4j.AssertionFailedError at ShippingTest.java:19
+
+ShippingTest > freeOverFiftyDollars() FAILED
+    org.opentest4j.AssertionFailedError at ShippingTest.java:13
+
+5 tests completed, 4 failed
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':test'.
+> There were failing tests. See the report at: file:///private/tmp/gradlecap/build/reports/tests/test/index.html
+
+* Try:
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+BUILD FAILED in 11s
+3 actionable tasks: 3 executed

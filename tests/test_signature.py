@@ -10,6 +10,7 @@ from issue2repro.signature import (
     compare_messages,
     compare_signatures,
     expected_signature,
+    gradle_exception,
     observed_frames,
     observed_signature,
     pytest_frames,
@@ -340,6 +341,155 @@ class TestRunnerTests:
 
     def test_output_from_no_runner_at_all(self):
         assert runner_tests("nothing to see here\n") == ([], None)
+
+
+class TestMavenSurefireTests:
+    """Failing test names from real `mvn test` output."""
+
+    def test_surefire_names_every_failing_test(self, jvm_maven_surefire):
+        names, source = runner_tests(jvm_maven_surefire)
+        assert source == "Maven Surefire failure lines"
+        assert names == [
+            "ShippingTest::flatRateUnderThreshold",
+            "ShippingTest::freeOverFiftyDollars",
+            "PricingTest::unknownCouponIsIgnored",
+        ]
+
+    def test_the_class_level_line_is_not_read_as_a_test(self, jvm_maven_surefire):
+        """The hazard: it ends in "<<< FAILURE!" exactly like a test line.
+
+        Surefire announces each class with "Tests run: 3, Failures: 3, ...
+        <<< FAILURE! -- in com.example.shop.ShippingTest". If that were
+        read, every Surefire run would report a test named after a count.
+        """
+        assert "Tests run: 3, Failures: 3, Errors: 0, Skipped: 0" in jvm_maven_surefire
+        names, _ = runner_tests(jvm_maven_surefire)
+        assert all("Tests" not in name.split("::")[-1] for name in names)
+        assert all("run" not in name.split("::")[0] for name in names)
+
+    def test_an_assertion_failure_and_an_exception_both_count(self):
+        """Surefire says FAILURE! for an assertion and ERROR! otherwise."""
+        output = (
+            "[ERROR] com.example.shop.ShippingTest.freeOverFiftyDollars"
+            " -- Time elapsed: 0.007 s <<< FAILURE!\n"
+            "[ERROR] com.example.shop.PricingTest.unknownCouponIsIgnored"
+            " -- Time elapsed: 0.003 s <<< ERROR!\n"
+        )
+        names, source = runner_tests(output)
+        assert source == "Maven Surefire failure lines"
+        assert names == [
+            "ShippingTest::freeOverFiftyDollars",
+            "PricingTest::unknownCouponIsIgnored",
+        ]
+
+    def test_a_parametrized_case_reduces_to_one_test(self):
+        """ "(int)[1]" and "(int)[2]" are one test, run twice."""
+        output = (
+            "[ERROR] com.example.shop.ShippingTest.flatRateUnderThreshold(int)[1]"
+            " -- Time elapsed: 0.067 s <<< FAILURE!\n"
+            "[ERROR] com.example.shop.ShippingTest.flatRateUnderThreshold(int)[2]"
+            " -- Time elapsed: 0.004 s <<< FAILURE!\n"
+        )
+        assert runner_tests(output)[0] == ["ShippingTest::flatRateUnderThreshold"]
+
+    def test_the_summary_block_alone_is_enough(self):
+        """An issue reporter pastes the tail of a build, not the whole log."""
+        output = (
+            "[ERROR] Failures: \n"
+            "[ERROR]   ShippingTest.freeOverFiftyDollars:13 expected: <0> but was: <599>\n"
+            "[ERROR] Errors: \n"
+            "[ERROR]   PricingTest.unknownCouponIsIgnored:22 » NullPointer Cannot invoke\n"
+        )
+        names, source = runner_tests(output)
+        assert source == "Maven Surefire failure lines"
+        assert names == [
+            "ShippingTest::freeOverFiftyDollars",
+            "PricingTest::unknownCouponIsIgnored",
+        ]
+
+    def test_a_full_log_does_not_double_count(self, jvm_maven_surefire):
+        """The per-test lines and the summary describe the same failures."""
+        names, _ = runner_tests(jvm_maven_surefire)
+        assert len(names) == len(set(names))
+
+    def test_surefire_stack_frames_are_not_read_as_tests(self):
+        """ "at com.example.shop.Pricing.applyCoupon(Pricing.java:13)" is a frame."""
+        output = "\tat com.example.shop.Pricing.applyCoupon(Pricing.java:13)\n"
+        assert runner_tests(output)[0] == []
+
+
+class TestGradleTests:
+    """Failing test names and exception type from real `gradle test` output."""
+
+    def test_gradle_names_every_failing_test(self, jvm_gradle_test):
+        names, source = runner_tests(jvm_gradle_test)
+        assert source == "Gradle failure lines"
+        assert names == [
+            "PricingTest::unknownCouponIsIgnored",
+            "ShippingTest::flatRateUnderThreshold",
+            "ShippingTest::freeOverFiftyDollars",
+        ]
+
+    def test_the_task_line_is_not_read_as_a_test(self, jvm_gradle_test):
+        """ "> Task :test FAILED" ends in FAILED and names no method."""
+        assert "> Task :test FAILED" in jvm_gradle_test
+        names, _ = runner_tests(jvm_gradle_test)
+        assert all("Task" not in name for name in names)
+        assert runner_tests("> Task :test FAILED\n")[0] == []
+
+    def test_a_parametrized_display_name_is_not_the_test(self):
+        """The method is not the last segment when a case has a display name."""
+        line = "ShippingTest > flatRateUnderThreshold(int) > [1] 100 FAILED\n"
+        assert runner_tests(line)[0] == ["ShippingTest::flatRateUnderThreshold"]
+
+    def test_a_nested_class_keeps_the_innermost_class(self):
+        """@Nested adds a segment, so the method is deeper than depth two."""
+        line = "OrderTest > WhenEmpty > totalIsZero() FAILED\n"
+        assert runner_tests(line)[0] == ["WhenEmpty::totalIsZero"]
+
+    def test_gradle_exception_type_is_read(self, jvm_gradle_test):
+        assert gradle_exception(jvm_gradle_test) == ("java.lang.NullPointerException", None)
+
+    def test_the_message_is_left_unknown_rather_than_invented(self, jvm_gradle_test):
+        """Gradle prints no message, so none is reported."""
+        signature = observed_signature(jvm_gradle_test)
+        assert signature.exception_type == "java.lang.NullPointerException"
+        assert signature.exception_message is None
+
+    def test_a_location_without_a_failed_line_above_it_is_not_an_exception(self):
+        """The anchor is position: prose can reach this shape otherwise."""
+        assert gradle_exception("java.lang.IllegalStateException at Foo.java:3\n") is None
+        assert gradle_exception("    java.lang.IllegalStateException at Foo.java:3\n") is None
+
+    def test_gradle_reports_no_frames_and_says_so(self, jvm_gradle_test):
+        """Gradle's default output carries no stack, so frames stay empty.
+
+        The location on the failure line names no symbol, and is
+        deliberately not turned into a frame, for the same reason a Rust
+        panic without RUST_BACKTRACE compares as unknown.
+        """
+        assert observed_signature(jvm_gradle_test).frames == []
+
+    def test_exception_format_full_buys_a_message_but_not_frames(self, jvm_gradle_full_exception):
+        """Pins what `testLogging { exceptionFormat "full" }` actually does.
+
+        The README states this, so it is measured here rather than
+        asserted there. The setting does print a real stack trace, and the
+        type and message become readable from it, but the frames still
+        attach to no trace: Gradle indents the exception header under the
+        FAILED line and the JVM extractor anchors a header at column zero.
+        Reading them is a ROADMAP item, and this test is what will fail
+        when it is done.
+        """
+        assert "        at com.example.shop.Pricing.applyCoupon" in jvm_gradle_full_exception
+        signature = observed_signature(jvm_gradle_full_exception)
+        assert signature.exception_message is not None
+        assert signature.frames == []
+        assert signature.tests == [
+            "PricingTest::unknownCouponIsIgnored",
+            "ShippingTest::flatRateUnderThreshold",
+            "ShippingTest::freeOverFiftyDollars",
+        ]
 
 
 class TestObservedFrames:

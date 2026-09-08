@@ -223,6 +223,22 @@ check "$WORK/javashop.txt" "[25/25] stack trace: jvm stack trace maps to existin
 check "$WORK/javashop.txt" "Language: unknown"
 check "$WORK/javashop.txt" "Reproduction confidence: 60% inferred"
 
+# The same repository, reported the way most JVM projects actually fail: the
+# reporter pasted a `mvn test` build log rather than a hand-run java command.
+# The point of this part is the "failing tests named" line. Surefire prints
+# each failure twice, once per test and once in the end-of-run summary, and
+# the class-level "Tests run: 3, ... <<< FAILURE! -- in ...ShippingTest" line
+# has the same ending as a test line without being one. All three names, and
+# only the three, come back.
+echo "== issue2repro inspect: a Maven Surefire build log, read from the issue =="
+"${I2R[@]}" inspect "https://github.com/example/javashop/issues/2" \
+    --issue-file "$ROOT/examples/javashop-issue-2.json" \
+    --clone-url "file://$WORK/javashop" | tee "$WORK/javashop-mvn.txt"
+
+check "$WORK/javashop-mvn.txt" "  failing tests named: PricingTest::unknownCouponIsIgnored, ShippingTest::flatRateUnderThreshold, ShippingTest::freeOverFiftyDollars"
+check "$WORK/javashop-mvn.txt" "  stack trace: jvm, 2 frame(s) (java.lang.NullPointerException: Cannot invoke"
+check "$WORK/javashop-mvn.txt" "[25/25] stack trace: jvm stack trace maps to existing file(s): src/main/java/com/example/shop/Pricing.java, src/test/java/com/example/shop/PricingTest.java"
+
 echo
 if [ "$FAILURES" -ne 0 ]; then
     echo "demo.sh: $FAILURES check(s) failed. The README and the tool disagree." >&2

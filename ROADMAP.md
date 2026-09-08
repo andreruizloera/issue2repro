@@ -41,6 +41,15 @@ implemented today; the README only documents what works now.
 - Follow issue references (#123, linked PRs) and merge their signals.
 - Parse `pip freeze` / `npm ls` blocks pasted into issues and pin those
   exact versions in the generated environment.
+- Read the stack frames out of a Gradle run configured with
+  `testLogging { exceptionFormat "full" }`. Gradle indents the exception
+  header under its `FAILED` line and the JVM trace extractor anchors a
+  header at column zero, so the frames underneath currently attach to no
+  trace. Measured on a real run: the type and message are read, the
+  frames are not. The fix is a positionally anchored header, the same
+  shape as `gradle_exception`, rather than loosening the column-zero
+  anchor for every language.
+- Ruby backtraces, now the last mainstream runtime whose stack is unread.
 
 ## Reproduction verification
 
