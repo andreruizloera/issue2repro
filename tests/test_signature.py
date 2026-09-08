@@ -470,6 +470,61 @@ class TestGradleTests:
         """
         assert observed_signature(jvm_gradle_test).frames == []
 
+    def test_an_issue_quoting_gradle_names_its_exception(self, jvm_gradle_test):
+        """The issue side reads the Gradle failure line, like the run side.
+
+        `observed_signature` has always fallen back to `gradle_exception`.
+        `expected_signature` did not, because it only ever read a recognized
+        stack trace and Gradle prints none, so an issue pasting a Gradle log
+        named no exception at all.
+        """
+        signature = expected_signature(extract_signals(jvm_gradle_test), jvm_gradle_test)
+        assert signature.exception_type == "java.lang.NullPointerException"
+        assert signature.exception_message is None
+        assert "Gradle failure line in the issue" in signature.sources
+
+    def test_a_gradle_issue_and_run_disagreeing_is_not_a_reproduction(self, jvm_gradle_test):
+        """The wrong verdict this fallback exists to prevent.
+
+        With no exception on the expected side the whole comparison rested
+        on test names, so an issue reporting one exception against a run
+        raising a different one compared as REPRODUCED. Measured against
+        the shipped code before the fix, which returned exactly that.
+        """
+        reported = jvm_gradle_test.replace(
+            "java.lang.NullPointerException", "java.lang.IllegalStateException"
+        )
+        expected = expected_signature(extract_signals(reported), reported)
+        observed = observed_signature(jvm_gradle_test)
+        assert expected.exception_type == "java.lang.IllegalStateException"
+        assert observed.exception_type == "java.lang.NullPointerException"
+        assert compare_signatures(expected, observed).exception == "mismatch"
+
+    def test_the_full_exception_format_is_deliberately_not_read_here(
+        self, jvm_gradle_full_exception
+    ):
+        """The asymmetry is only closed for Gradle's DEFAULT output.
+
+        Under `testLogging { exceptionFormat "full" }` a RUN's output is
+        readable by the general exception scanner and the issue side still
+        reads nothing, so the two sides remain asymmetric for that format.
+        Closing it was tried and reverted, because the two sides pick a
+        different failure when several tests fail: the reader above returns
+        the FIRST failing test's exception and the general scanner keeps the
+        LAST, and this fixture has four failures with two different types.
+        Wiring it up would turn a real reproduction into a PARTIAL. It is a
+        ROADMAP item, and this test is what will fail when it is done.
+        """
+        text = jvm_gradle_full_exception
+        # The narrow reader does not fire: its line needs a trailing
+        # `at File.java:12`, and the full format prints `: message` instead.
+        assert gradle_exception(text) is None
+        assert expected_signature(extract_signals(text), text).exception_type is None
+        # A reader anchored the same way would return the FIRST failing
+        # test's type, which is not what the run side reports.
+        assert text.index("NullPointerException") < text.index("AssertionFailedError")
+        assert observed_signature(text).exception_type == "org.opentest4j.AssertionFailedError"
+
     def test_exception_format_full_buys_a_message_but_not_frames(self, jvm_gradle_full_exception):
         """Pins what `testLogging { exceptionFormat "full" }` actually does.
 

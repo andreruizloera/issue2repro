@@ -27,13 +27,25 @@ implemented today; the README only documents what works now.
   gives. No install step is generated because both build tools resolve
   inside the task they run and a warm-up goal (`dependency:go-offline`)
   fails on some real projects.
-- Verify a committed GRADLE workspace end to end. The Maven one now runs
-  in `demo.sh` on both the host and the container path, but Gradle is
-  still only generated and read: its behavior was measured against a real
-  Gradle 9.7.1 project during development and fixtures pin the output,
-  and nothing in CI executes it. A wrapper project also has to commit the
-  wrapper JAR for the container path to work, which is a fixture question
-  before it is a code question.
+- Read an `exceptionFormat "full"` Gradle block on the ISSUE side. A RUN's
+  output in that format is already read by the general exception scanner,
+  message included; an issue pasting the same block yields no exception at
+  all, so the two sides parse one format differently. Gradle's DEFAULT
+  output is read from both sides and that is what the end-to-end example
+  relies on. Wiring up the full format was tried and reverted: the
+  issue-side reader is anchored on the line under the first `FAILED` line
+  while the run side keeps the last exception it sees, so a log with
+  several failing tests of different types would compare two different
+  exceptions and downgrade a real reproduction to `PARTIAL`. Doing it
+  safely means making both sides agree on WHICH failure they describe,
+  which is a bigger change than the reader itself.
+- Verify a committed Gradle workspace with a WRAPPER end to end.
+  `examples/gradleshop` has no `gradlew`, so it exercises the
+  `gradle:8-jdk21` image and the `gradle` on PATH. The wrapper path picks
+  `eclipse-temurin:21-jdk` and is still generated but never run, because a
+  wrapper project only works if its JAR is committed and this repository
+  does not vendor binaries. Doing it means finding a way to produce the
+  wrapper at demo time rather than committing it.
 - Read a Go `t.Errorf` location (`tax_test.go:7: got 107, want 110`) as a
   failure location. It is deliberately not read as a frame today because
   the pattern is close to ordinary prose; doing it safely probably means

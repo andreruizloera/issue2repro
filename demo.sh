@@ -312,6 +312,72 @@ else
     echo "   or set DEMO_VERIFY_DOCKER=1 to run it in a container instead."
 fi
 
+# The other JVM build tool. examples/gradleshop commits NO Gradle wrapper, so
+# `gradle` comes from PATH on the host and from the gradle:8-jdk21 base image
+# in the container. That is deliberate: a wrapper only works if its JAR is
+# committed, and this repository does not vendor binaries.
+echo
+echo "== issue2repro inspect: a Gradle repository =="
+cp -R "$ROOT/examples/gradleshop" "$WORK/gradleshop"
+git -C "$WORK/gradleshop" init --quiet
+git -C "$WORK/gradleshop" add --all
+git -C "$WORK/gradleshop" -c user.name=fixture -c user.email=fixture@example.invalid \
+    commit --quiet --message "gradleshop demo fixture"
+
+"${I2R[@]}" inspect "https://github.com/example/gradleshop/issues/1" \
+    --issue-file "$ROOT/examples/gradleshop-issue-1.json" \
+    --clone-url "file://$WORK/gradleshop" | tee "$WORK/gradleshop.txt"
+
+check "$WORK/gradleshop.txt" "Language: jvm (build.gradle, settings.gradle)"
+check "$WORK/gradleshop.txt" "Test command: gradle --no-daemon test"
+check "$WORK/gradleshop.txt" "Build command: gradle --no-daemon build -x test"
+check "$WORK/gradleshop.txt" "  failing tests named: PricingTest::unknownCouponIsIgnored"
+# Gradle's default output carries no stack trace, so there is nothing to map
+# to a file and the confidence is honestly lower than the Maven example's.
+check "$WORK/gradleshop.txt" "  stack traces: none"
+check "$WORK/gradleshop.txt" "Reproduction confidence: 75% inferred"
+
+echo
+echo "== issue2repro build: the Gradle workspace =="
+"${I2R[@]}" build "https://github.com/example/gradleshop/issues/1" \
+    --issue-file "$ROOT/examples/gradleshop-issue-1.json" \
+    --clone-url "file://$WORK/gradleshop" \
+    --output "$WORK/gradlerepro" >/dev/null
+echo "-- Dockerfile"
+cat "$WORK/gradlerepro/Dockerfile"
+check "$WORK/gradlerepro/Dockerfile" "FROM gradle:8-jdk21"
+
+# This EXECUTES the Gradle workspace, the half that was generated but never
+# run until now. Maven and Gradle are both real end to end from here.
+echo
+if [ "${DEMO_VERIFY_DOCKER:-}" = "1" ] || command -v gradle >/dev/null 2>&1; then
+    echo "== issue2repro verify: the Gradle workspace, actually run =="
+    code=0
+    "${I2R[@]}" verify "https://github.com/example/gradleshop/issues/1" \
+        --issue-file "$ROOT/examples/gradleshop-issue-1.json" \
+        --clone-url "file://$WORK/gradleshop" \
+        --output "$WORK/gradleverify" \
+        $HOST_FLAG >"$WORK/vgradle.txt" 2>&1 || code=$?
+    sed -n '/^Verification:/,$p' "$WORK/vgradle.txt"
+    check_exit "$code" 0 "verify (Gradle reproduced)"
+    check "$WORK/vgradle.txt" "Verification: REPRODUCED ($(where_clause example-gradleshop-1))"
+    check "$WORK/vgradle.txt" "exception: match"
+    check "$WORK/vgradle.txt" "tests:     match (PricingTest::unknownCouponIsIgnored)"
+    # Gradle prints no stack trace by default, so there is no frame to compare
+    # and `verify` prints no frames line at all rather than guessing. The
+    # README says so, and this is what holds it to that.
+    if grep -q "  frames:" "$WORK/vgradle.txt"; then
+        echo "DEMO CHECK FAILED: expected NO frames line in vgradle.txt" >&2
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo "== issue2repro verify: the Gradle workspace [SKIPPED] =="
+    echo "   No gradle on PATH and DEMO_VERIFY_DOCKER is not set, so the"
+    echo "   Gradle reproduction was generated above but not executed."
+    echo "   Install Gradle, or set DEMO_VERIFY_DOCKER=1 to run it in a"
+    echo "   container instead."
+fi
+
 echo
 if [ "$FAILURES" -ne 0 ]; then
     echo "demo.sh: $FAILURES check(s) failed. The README and the tool disagree." >&2

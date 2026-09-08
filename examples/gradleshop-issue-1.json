@@ -1,0 +1,16 @@
+{
+  "title": "gradle test: unknown coupon code fails PricingTest with a NullPointerException",
+  "body": "`Pricing.applyCoupon` should leave the amount alone when the coupon code\nis not in the map. Instead `gradle test` fails.\n\n```bash\ngradle --no-daemon test\n```\n\n```\n> Task :test FAILED\n\nPricingTest > unknownCouponIsIgnored() FAILED\n    java.lang.NullPointerException at PricingTest.java:22\n\n2 tests completed, 1 failed\n\nFAILURE: Build failed with an exception.\n\n* What went wrong:\nExecution failed for task ':test'.\n> There were failing tests. See the report at: file:///home/dana/gradleshop/build/reports/tests/test/index.html\n\nBUILD FAILED in 8s\n3 actionable tasks: 3 executed\n```\n\nThis is Gradle 9.7.1 with JUnit 5. Note that Gradle prints no stack trace\nby default, so the report above is all the detail the console gives.\n",
+  "number": 1,
+  "state": "open",
+  "html_url": "https://github.com/example/gradleshop/issues/1",
+  "user": {
+    "login": "dana"
+  },
+  "labels": [
+    {
+      "name": "bug"
+    }
+  ],
+  "comments": []
+}

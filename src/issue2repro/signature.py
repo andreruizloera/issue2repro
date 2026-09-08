@@ -489,6 +489,19 @@ def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
     if tests:
         signature.sources.append("test function name(s) in the stack trace")
 
+    if signature.exception_type is None:
+        # Gradle's default test output carries no stack trace, so the loop
+        # above finds nothing and an issue quoting a Gradle log would name no
+        # exception at all. `observed_signature` already falls back to this
+        # same reader for the run's output; without the same fallback here the
+        # two sides parse the same format differently, and a Gradle verdict
+        # rests on matching test names alone. That is the weak case: a test
+        # failing for an unrelated reason still has the reported name.
+        gradle = gradle_exception(text)
+        if gradle:
+            signature.exception_type = gradle[0]
+            signature.sources.append("Gradle failure line in the issue")
+
     for match in _NODE_ID.finditer(text):
         name = _test_name(match["nodeid"])
         if name not in tests:

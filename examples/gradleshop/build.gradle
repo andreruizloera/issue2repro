@@ -1,0 +1,28 @@
+// Deliberately no Gradle wrapper. A wrapper would pin the Gradle version, but
+// it only works if the wrapper JAR is committed, and issue2repro is not the
+// place to vendor a binary. Without one, `gradle` comes from PATH on the host
+// and from the gradle:8-jdk21 base image in the container, which is exactly
+// the no-wrapper path issue2repro generates for.
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// `options.release` rather than a toolchain, so the same build file compiles
+// under the container's JDK 21 and whatever JDK the host happens to have,
+// without Gradle trying to download a JDK it was not asked for.
+tasks.withType(JavaCompile).configureEach {
+    options.release = 17
+}
+
+test {
+    useJUnitPlatform()
+}

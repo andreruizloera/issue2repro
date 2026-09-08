@@ -472,10 +472,11 @@ Four decisions here were measured against Maven 3.9.16 with Surefire
   mean editing the project's own build file, so a Gradle workspace runs the
   whole test task instead. The asymmetry is a measurement, not an oversight.
 
-That workspace is not just generated, it is run. `demo.sh` verifies the
-committed `examples/javashop` project end to end, so `mvn test` really
-executes, Surefire really fails, and the failure it prints is compared
-against the one the issue reports:
+That workspace is not just generated, it is run, for both build tools.
+`demo.sh` verifies the committed `examples/javashop` (Maven) and
+`examples/gradleshop` (Gradle) projects end to end, so `mvn test` and
+`gradle test` really execute, Surefire and Gradle really fail, and the
+failure each prints is compared against the one its issue reports:
 
 ```
 $ ./demo.sh
@@ -502,9 +503,28 @@ image instead, which is what CI's `verify-in-docker` job does. The demo
 asserts which path ran, not only the verdict: every other line it checks is
 identical on both paths, so without that assertion the container job would
 keep passing if the container path stopped being taken. The equivalent
-Gradle project reports `REPRODUCED` on test names alone, with a note that
-the issue names no exception type, which is Gradle's default output being
-what it is rather than anything the workspace does differently.
+Gradle project in `examples/gradleshop` runs the same way, on both paths,
+and reports:
+
+```
+Verification: REPRODUCED (observed by running reproduce.sh on this machine)
+  the run failed the way the issue describes
+  expected (from the issue): java.lang.NullPointerException; PricingTest::unknownCouponIsIgnored
+  observed (from the run):   java.lang.NullPointerException; PricingTest::unknownCouponIsIgnored
+  exception: match
+  tests:     match (PricingTest::unknownCouponIsIgnored)
+```
+
+There is no `frames:` line, and that is Gradle's default output being what
+it is rather than anything the workspace does differently: Gradle prints no
+stack trace, so there is nothing to compare and nothing is guessed. The demo
+asserts the absence of that line, not just the presence of the others.
+
+That project commits **no Gradle wrapper**, on purpose. A wrapper pins the
+Gradle version but only works if its JAR is committed, and this repository
+does not vendor binaries. Without one, `gradle` comes from PATH on the host
+and from the `gradle:8-jdk21` base image in the container, which is the
+no-wrapper path the workspace generator already emitted.
 
 One consequence of generating no install layer is worth stating, because it
 is the price of that decision. A Python image resolves dependencies in a
@@ -725,12 +745,22 @@ reproduction would.
   an exception type only, so a Gradle-to-Gradle comparison decides on
   those two and reports `unknown` for the other two rather than guessing.
   A project that configures `testLogging { exceptionFormat "full" }` does
-  print a real stack trace, and its exception type and message are then
+  print a real stack trace, and a RUN's exception type and message are then
   read from it, but **its frames are still not**: Gradle indents the
   exception header under the `FAILED` line, and the JVM trace extractor
   anchors a header at column zero, so no trace is opened for those frames
   to attach to. That was measured on a real `exceptionFormat "full"` run,
   not assumed, and reading it is a ROADMAP item.
+- **The `exceptionFormat "full"` output is read from a RUN but not from an
+  ISSUE**, so the two sides parse that one format differently. Gradle's
+  DEFAULT output is read from both, which is what the example above
+  depends on. Closing the remaining half was tried and deliberately
+  reverted: the issue-side reader is anchored on the line under the first
+  `FAILED` line, while the run side keeps the LAST exception it sees, so on
+  a log with several failing tests of different types the two would name
+  different exceptions and a real reproduction would be downgraded to
+  `PARTIAL`. A test pins all three of those facts, and doing it properly is
+  a ROADMAP item.
 - **A JVM reproduction is verified end to end on both paths, but only the
   container path is exercised on a machine with Docker, and that machine is
   CI.** There is no Docker daemon on the machine this is developed on, so
@@ -738,17 +768,12 @@ reproduction would.
   container path is checked by CI's `verify-in-docker` job on every push.
   A `docker build` failure specific to an environment CI does not have
   would not be caught here.
-- **The host path of the demo needs Maven, and skips if it is missing.**
-  Without `mvn` on PATH and without `DEMO_VERIFY_DOCKER=1`, the JVM
-  workspace is generated and checked but not executed. The demo prints
-  `[SKIPPED]` and says why rather than passing quietly, but a green
-  `./demo.sh` on a machine with no JVM toolchain has checked less than the
-  same command on one that has it.
-- **Only Maven is executed end to end; Gradle is generated and read, not
-  run in the demo.** The Gradle test-name and workspace behavior was
-  measured against a real Gradle 9.7.1 project during development, and
-  fixtures pin its output, but no committed Gradle project is verified by
-  `demo.sh` or CI.
+- **The host path of the demo needs Maven and Gradle, and skips each one
+  that is missing.** Without `mvn` or without `gradle` on PATH, and without
+  `DEMO_VERIFY_DOCKER=1`, that build tool's workspace is generated and
+  checked but not executed. The demo prints `[SKIPPED]` and says why rather
+  than passing quietly, but a green `./demo.sh` on a machine with no JVM
+  toolchain has checked less than the same command on one that has it.
 - **A JVM frame names a file, never a path.** `Pricing.java` carries no
   directory, so mapping it onto a repository file matches on the name
   alone. A project with two files of the same name in different packages
