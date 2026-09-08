@@ -334,6 +334,36 @@ Reproduction confidence: 60% inferred
   [ 0/20] language detected: no Python or Node manifest at the repository root
 ```
 
+The same repository, reported the way JVM projects usually fail: the
+reporter pasted a `mvn test` build log rather than a hand-run `java`
+command. This is demo part 7 and its output is checked by `demo.sh`:
+
+```console
+$ issue2repro inspect https://github.com/example/javashop/issues/2 \
+    --issue-file examples/javashop-issue-2.json --clone-url file://$PWD/javashop
+Issue: example/javashop#2: mvn test: unknown coupon code fails PricingTest with a NullPointerException
+Language: unknown
+Test command: not detected
+Signals:
+  explicit commands (1):
+    $ mvn test
+  stack trace: jvm, 2 frame(s) (java.lang.NullPointerException: Cannot invoke "java.lang.Integer.intValue()" because the return value of "java.util.Map.get(Object)" is null)
+  filenames mentioned: Pricing.java, PricingTest.java, Method.java, ArrayList.java
+  failing tests named: PricingTest::unknownCouponIsIgnored, ShippingTest::flatRateUnderThreshold, ShippingTest::freeOverFiftyDollars
+
+Reproduction confidence: 60% inferred
+  [35/35] explicit repro commands: 1 command(s) found in fenced shell blocks
+  [25/25] stack trace: jvm stack trace maps to existing file(s): src/main/java/com/example/shop/Pricing.java, src/test/java/com/example/shop/PricingTest.java
+  [ 0/20] test command: no test runner configuration found
+  [ 0/20] language detected: no Python or Node manifest at the repository root
+```
+
+All three failing tests come back, and only those three. Surefire named
+each of them twice, once per test and once in its end-of-run summary, and
+its class-level `Tests run: 3, ... <<< FAILURE! -- in
+com.example.shop.ShippingTest` line ends exactly like a per-test line
+without being one.
+
 Three things about the JVM changed the design:
 
 - **A `Caused by:` chain reports the deepest cause, not the outermost
