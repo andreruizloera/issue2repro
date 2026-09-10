@@ -136,6 +136,36 @@ class TestDecide:
         assert result.observed.exception_type == "ValueError"
         assert result.verdict == "environment-failure"
 
+    def test_a_gradle_run_answers_about_the_test_the_issue_named(self, jvm_gradle_full_exception):
+        """decide() is the wiring, and it is what the CLI actually calls.
+
+        The signature module can align the two sides only if the run side is
+        told which test the issue was about. This drives the whole path: an
+        issue quoting one failing test out of the four this build produced,
+        against the build's own output.
+        """
+        run = jvm_gradle_full_exception
+        expected = FailureSignature(
+            exception_type="org.opentest4j.AssertionFailedError",
+            exception_message="expected: <0> but was: <599>",
+            tests=["ShippingTest::freeOverFiftyDollars"],
+            gradle_test="ShippingTest::freeOverFiftyDollars",
+        )
+        result = decide(expected, outcome(output=run))
+        assert result.observed.gradle_test == "ShippingTest::freeOverFiftyDollars"
+        assert result.observed.exception_type == "org.opentest4j.AssertionFailedError"
+        assert result.match.exception == "match"
+        assert result.verdict == "reproduced"
+
+        # The negative control: the same run, with the issue naming nothing to
+        # align on, lands on Gradle's first block instead and disagrees.
+        blind = decide(
+            FailureSignature(exception_type="org.opentest4j.AssertionFailedError"),
+            outcome(output=run),
+        )
+        assert blind.observed.exception_type == "java.lang.NullPointerException"
+        assert blind.match.exception == "mismatch"
+
 
 class TestMarkers:
     def test_last_marker_wins(self, tmp_path):

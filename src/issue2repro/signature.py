@@ -16,6 +16,8 @@ failing test line up, not that the two runs executed the same bytecode.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+from typing import NamedTuple
 
 from issue2repro.extract import (
     extract_go_traces,
@@ -123,13 +125,18 @@ _SUREFIRE_SUMMARY_FAIL = re.compile(
 # method is not at a fixed depth: see _gradle_test_id.
 _GRADLE_FAILED = re.compile(r"^(?P<body>\S.*?)\s+FAILED\s*$")
 _GRADLE_METHOD = re.compile(r"^(?P<name>[\w$]+)\([^)]*\)$")
-# The line Gradle indents under a failing test, which carries the exception
-# type and a location but no message and no stack:
-#   "    java.lang.NullPointerException at PricingTest.java:22"
-# Read only when it directly follows a Gradle FAILED line, because on its
-# own this shape is close to prose.
+# The line Gradle indents under a failing test. Its shape depends on the
+# project's testLogging block, and both shapes are the same header:
+#   default:   "    java.lang.NullPointerException at PricingTest.java:22"
+#   full:      "    java.lang.NullPointerException: Cannot invoke ..."
+#   full, no message: "    java.lang.NullPointerException"
+# Only the default form carries a location and only the full form carries a
+# message, so neither is required. Read only when it directly follows a
+# Gradle FAILED line, because on its own this shape is close to prose: that
+# position, not the shape, is what keeps it off ordinary text.
 _GRADLE_EXC = re.compile(
-    rf"^\s+(?P<type>[A-Za-z_][\w.]*{_EXC_SUFFIXES})\s+at\s+[\w$.]+\.\w+:\d+\s*$"
+    rf"^\s+(?P<type>[A-Za-z_][\w.]*{_EXC_SUFFIXES})"
+    rf"(?:\s+at\s+[\w$.]+\.\w+:\d+|:\s*(?P<message>\S.*?))?\s*$"
 )
 _NODE_SPEC_FAIL = re.compile(r"^\s*[✖✗×]\s+(?P<name>.+?)\s*\([\d.]+m?s\)\s*$")
 # A TAP line can announce a skipped or planned test rather than a failure.
@@ -219,33 +226,84 @@ def _gradle_test_id(line: str) -> str | None:
     return None
 
 
-def gradle_exception(output: str) -> tuple[str, None] | None:
-    """The exception type Gradle names under a failing test, if any.
+class GradleFailure(NamedTuple):
+    """One failing test's block in Gradle's test output.
 
-    Gradle's default test output prints no stack trace at all. It prints
-    one indented line per failure carrying the type and a source location:
+    ``message`` is None under Gradle's default output, which prints a source
+    location instead of a message. It is filled in only under ``testLogging
+    { exceptionFormat "full" }``, which prints the real exception header.
+    """
+
+    test: str
+    exception_type: str
+    message: str | None
+
+
+def gradle_failures(output: str) -> list[GradleFailure]:
+    """Every failing test Gradle printed an exception header for, in order.
+
+    Gradle's default test output prints no stack trace at all. It prints one
+    indented line per failure carrying the type and a source location:
     ``java.lang.NullPointerException at PricingTest.java:22``. That line is
     invisible to the general exception scanner, which requires the type to
     end the line or be followed by ``: message``, so without this a Gradle
     run produces a completely empty signature.
 
-    Only the type is returned. Gradle prints no message, and the message is
-    left None rather than filled in from the location, so the comparison
-    reports ``unknown`` for it instead of a wrong answer. The location is
-    deliberately NOT turned into a frame: it names no symbol, which is the
-    same reason a Rust panic without ``RUST_BACKTRACE`` compares as unknown.
+    Under ``testLogging { exceptionFormat "full" }`` the same position holds
+    a real exception header with a message, which the general scanner CAN
+    read. Reading both shapes here rather than leaving the full form to that
+    scanner is what makes the two formats answer alike: the scanner sees the
+    whole build log and keeps the LAST exception in it, so on this project's
+    own four-failure fixture the default format reported
+    ``java.lang.NullPointerException`` and the full format reported
+    ``org.opentest4j.AssertionFailedError``, for the same four failures of
+    the same build. Which type the tool named depended on the reporter's
+    testLogging block.
 
-    The anchor is position, not shape: the line must directly follow a
-    Gradle FAILED line.
+    The location on the default form is deliberately NOT turned into a
+    frame: it names no symbol, which is the same reason a Rust panic without
+    ``RUST_BACKTRACE`` compares as unknown. The full form's indented ``at``
+    frames are not read either; that is a separate ROADMAP item.
+
+    The anchor is position, not shape: a header is read only on the line
+    directly after a Gradle FAILED line.
     """
+    failures: list[GradleFailure] = []
     lines = output.splitlines()
     for index, line in enumerate(lines[:-1]):
-        if _gradle_test_id(line) is None:
+        test = _gradle_test_id(line)
+        if test is None:
             continue
         found = _GRADLE_EXC.match(lines[index + 1])
         if found:
-            return found["type"], None
-    return None
+            failures.append(GradleFailure(test, found["type"], found["message"]))
+    return failures
+
+
+def gradle_exception(output: str, prefer_tests: Sequence[str] = ()) -> GradleFailure | None:
+    """The one Gradle failure to compare, out of however many a build had.
+
+    A build usually fails several tests at once and an issue usually quotes
+    one. Picking by position on each side independently is what makes the
+    two sides describe DIFFERENT failures: an issue quoting only the
+    ``NullPointerException`` block of this project's fixture, against a run
+    that reproduced it exactly, compares that against whichever block the
+    run's own rule landed on and reports a mismatch on a real reproduction.
+
+    So the run side passes the tests the issue named as ``prefer_tests``,
+    and the failure for one of THOSE tests wins. Nothing is invented: the
+    choice is only ever among failures this output actually printed, and
+    when none of them is a test the issue named, the first is used and the
+    comparison stands on its own.
+    """
+    failures = gradle_failures(output)
+    if not failures:
+        return None
+    wanted = {_test_name(name) for name in prefer_tests}
+    for failure in failures:
+        if _test_name(failure.test) in wanted:
+            return failure
+    return failures[0]
 
 
 def runner_tests(text: str) -> tuple[list[str], str | None]:
@@ -490,16 +548,18 @@ def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
         signature.sources.append("test function name(s) in the stack trace")
 
     if signature.exception_type is None:
-        # Gradle's default test output carries no stack trace, so the loop
-        # above finds nothing and an issue quoting a Gradle log would name no
-        # exception at all. `observed_signature` already falls back to this
-        # same reader for the run's output; without the same fallback here the
-        # two sides parse the same format differently, and a Gradle verdict
-        # rests on matching test names alone. That is the weak case: a test
-        # failing for an unrelated reason still has the reported name.
+        # Gradle's test output carries no stack trace the loop above can read:
+        # the default format prints none at all, and the full format indents
+        # its header under the FAILED line where the JVM extractor, which
+        # anchors a header at column zero, does not see it. Either way an
+        # issue quoting a Gradle log would name no exception, and the verdict
+        # would rest on matching test names alone. That is the weak case: a
+        # test failing for an unrelated reason still has the reported name.
         gradle = gradle_exception(text)
         if gradle:
-            signature.exception_type = gradle[0]
+            signature.exception_type = gradle.exception_type
+            signature.exception_message = gradle.message
+            signature.gradle_test = gradle.test
             signature.sources.append("Gradle failure line in the issue")
 
     for match in _NODE_ID.finditer(text):
@@ -524,44 +584,64 @@ def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
     return signature
 
 
-def observed_signature(output: str, expect_type: str | None = None) -> FailureSignature:
+def observed_signature(
+    output: str,
+    expect_type: str | None = None,
+    expect_tests: Sequence[str] = (),
+) -> FailureSignature:
     """The failure this run's output shows.
 
     Exception text is taken from the most specific source available, in
-    order: pytest's "E   " echo and plain tracebacks (both untruncated),
-    then pytest's short-summary line, which pytest may have truncated.
-    Frames come from :func:`observed_frames`. Failing tests come from
-    pytest's short summary, and when a run printed none, from the other
-    runners' formats through :func:`runner_tests`.
+    order: a Gradle failure block, then pytest's "E   " echo and plain
+    tracebacks (both untruncated), then pytest's short-summary line, which
+    pytest may have truncated. Frames come from :func:`observed_frames`.
+    Failing tests come from pytest's short summary, and when a run printed
+    none, from the other runners' formats through :func:`runner_tests`.
 
     ``expect_type`` is a targeted fallback. The general matcher only
     recognizes exception names with a conventional suffix, so a project's
     ``MyBadThing`` would be invisible; when the issue names a type, that
     exact token is also searched for. Nothing is invented: the token still
     has to appear in the output as an exception line.
+
+    ``expect_tests`` names the tests the issue pointed at, most specific
+    first, and is used only to choose among several Gradle failures. See
+    :func:`gradle_exception` for why choosing is necessary.
     """
     signature = FailureSignature()
     lines = output.splitlines()
 
     full: tuple[str, str | None] | None = None
-    for line in lines:
-        body = line.strip()
-        e_line = _PYTEST_E_LINE.match(line)
-        if e_line:
-            body = e_line["body"].strip()
-        exc_type, message = _split_exception(body)
-        if exc_type is None and expect_type and body.startswith(expect_type):
-            rest = body[len(expect_type) :]
-            if rest.startswith(":") or not rest.strip():
-                exc_type = expect_type
-                message = rest.lstrip(":").strip() or None
-        if exc_type:
-            full = (exc_type, message)
+
+    # Gradle first, and ahead of the general line scanner rather than behind
+    # it. The scanner reads the whole build log and keeps the LAST exception
+    # anywhere in it; Gradle's own block says which test each exception
+    # belongs to, which is what lets this side and the issue side land on the
+    # same failure. Deciding by position over the whole log cannot do that.
+    gradle = gradle_exception(output, expect_tests)
+    if gradle is not None:
+        full = (gradle.exception_type, gradle.message)
+        signature.gradle_test = gradle.test
+        signature.sources.append("Gradle failure line in the output")
+    else:
+        for line in lines:
+            body = line.strip()
+            e_line = _PYTEST_E_LINE.match(line)
             if e_line:
-                if "pytest failure detail" not in signature.sources:
-                    signature.sources.append("pytest failure detail")
-            elif "exception line in the output" not in signature.sources:
-                signature.sources.append("exception line in the output")
+                body = e_line["body"].strip()
+            exc_type, message = _split_exception(body)
+            if exc_type is None and expect_type and body.startswith(expect_type):
+                rest = body[len(expect_type) :]
+                if rest.startswith(":") or not rest.strip():
+                    exc_type = expect_type
+                    message = rest.lstrip(":").strip() or None
+            if exc_type:
+                full = (exc_type, message)
+                if e_line:
+                    if "pytest failure detail" not in signature.sources:
+                        signature.sources.append("pytest failure detail")
+                elif "exception line in the output" not in signature.sources:
+                    signature.sources.append("exception line in the output")
 
     if full is None:
         # A Rust panic announces itself as "thread 'main' panicked at

@@ -416,6 +416,18 @@ exception type, and no message and no frames. The message is left
 turned into a frame, because it names no symbol, which is the same reason
 a Rust panic without `RUST_BACKTRACE` compares as `unknown`.
 
+Both shapes of that line are read, and read the same way on both sides of
+the comparison. Under `testLogging { exceptionFormat "full" }` the same
+position holds a real exception header with a message instead of a
+location, and the whole block is parsed with the test it belongs to, so an
+issue quoting a Gradle log and a run producing one are compared failure by
+failure rather than by whatever each side happened to see last. Before
+that, the general exception scanner handled the full format for a run by
+keeping the last exception anywhere in the log, which meant the same build
+reported `java.lang.NullPointerException` when captured in the default
+format and `org.opentest4j.AssertionFailedError` when captured in the full
+one.
+
 ### Maven and Gradle workspaces
 
 A repository with a `pom.xml` or a `build.gradle` is detected as `jvm`, so
@@ -740,27 +752,30 @@ reproduction would.
   be aware that the exception line is only read when it sits at the start
   of a line with a conventional type suffix, so a runtime that decorates
   its header may produce no signature at all rather than a partial one.
-- **A Gradle run carries no frames and no exception message**, because
-  Gradle's default test output prints neither. It yields a test name and
-  an exception type only, so a Gradle-to-Gradle comparison decides on
-  those two and reports `unknown` for the other two rather than guessing.
-  A project that configures `testLogging { exceptionFormat "full" }` does
-  print a real stack trace, and a RUN's exception type and message are then
-  read from it, but **its frames are still not**: Gradle indents the
-  exception header under the `FAILED` line, and the JVM trace extractor
-  anchors a header at column zero, so no trace is opened for those frames
-  to attach to. That was measured on a real `exceptionFormat "full"` run,
-  not assumed, and reading it is a ROADMAP item.
-- **The `exceptionFormat "full"` output is read from a RUN but not from an
-  ISSUE**, so the two sides parse that one format differently. Gradle's
-  DEFAULT output is read from both, which is what the example above
-  depends on. Closing the remaining half was tried and deliberately
-  reverted: the issue-side reader is anchored on the line under the first
-  `FAILED` line, while the run side keeps the LAST exception it sees, so on
-  a log with several failing tests of different types the two would name
-  different exceptions and a real reproduction would be downgraded to
-  `PARTIAL`. A test pins all three of those facts, and doing it properly is
-  a ROADMAP item.
+- **A Gradle run carries no frames**, and carries no exception message
+  unless the project configures `testLogging { exceptionFormat "full" }`.
+  Gradle's default test output prints one indented type-and-location line
+  per failure and no stack at all, so a default-format comparison decides
+  on the test name and the exception type and reports `unknown` for the
+  other two rather than guessing. The full format does print a real stack
+  trace, so the message becomes readable, but **its frames are still not**:
+  Gradle indents them under the `FAILED` line, and the JVM trace extractor
+  anchors a header at column zero, so no trace is opened for them to attach
+  to. That was measured on a real `exceptionFormat "full"` run, not
+  assumed, and reading it is a ROADMAP item.
+- **Which Gradle failure gets compared is chosen by test name, and when the
+  issue names no test that the run also failed, it falls back to the first
+  one Gradle printed.** A build usually fails several tests at once, often
+  with more than one exception type, and a signature holds one exception.
+  Both sides read every `FAILED` block with the test it belongs to, and the
+  run side is told which test the issue pointed at, so the two sides
+  describe the same failure instead of each picking by position. Position
+  is not a usable rule here: this repository commits two real Gradle
+  captures of the same reported `NullPointerException`, one where Gradle
+  printed it first and one where it printed it second, and a test asserts
+  the comparison is right on both. When the fallback is used, the reported
+  exception is whichever failure came first, which may not be the one the
+  issue was about.
 - **A JVM reproduction is verified end to end on both paths, but only the
   container path is exercised on a machine with Docker, and that machine is
   CI.** There is no Docker daemon on the machine this is developed on, so

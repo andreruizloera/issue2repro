@@ -137,6 +137,13 @@ class FailureSignature:
     print their stacks the other way round and are reversed on the way in by
     :func:`issue2repro.extract.outermost_first`, so the last element means
     the same thing for every language.
+
+    ``gradle_test`` is set only when the exception was read from a Gradle
+    failure block, and names the test whose block it came from. A Gradle
+    build usually fails several tests at once with more than one exception
+    type, so which block was read is part of the answer: the run side is
+    given the issue side's ``gradle_test`` so that both sides describe the
+    same failure rather than each picking by position.
     """
 
     exception_type: str | None = None
@@ -145,6 +152,7 @@ class FailureSignature:
     frames: list[StackFrame] = field(default_factory=list)
     tests: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
+    gradle_test: str | None = None
 
     @property
     def is_empty(self) -> bool:

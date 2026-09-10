@@ -145,6 +145,24 @@ def jvm_gradle_full_exception() -> str:
 
 
 @pytest.fixture
+def jvm_gradle_full_reported_last() -> str:
+    """Real `gradle test` output where the REPORTED failure is not the first.
+
+    The same shape as jvm_gradle_full_exception with the two exception types
+    the other way round: an assertion failure first, the NullPointerException
+    the issue is about second. Captured by running `issue2repro verify`
+    against a copy of examples/gradleshop with an `exceptionFormat "full"`
+    block and a second, deliberately broken assertion, under Gradle 9.7.1.
+
+    It is committed because it is the control for the pair. Picking the
+    first Gradle block is wrong on this output and picking the last is wrong
+    on the other one, so having only one of them would let either rule look
+    correct.
+    """
+    return load_output("jvm_gradle_full_reported_last.txt")
+
+
+@pytest.fixture
 def python_repo(tmp_path: Path) -> Path:
     """A minimal Python project matching the python_issue fixture."""
     root = tmp_path / "pyrepo"

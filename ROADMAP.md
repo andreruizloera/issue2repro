@@ -27,18 +27,14 @@ implemented today; the README only documents what works now.
   gives. No install step is generated because both build tools resolve
   inside the task they run and a warm-up goal (`dependency:go-offline`)
   fails on some real projects.
-- Read an `exceptionFormat "full"` Gradle block on the ISSUE side. A RUN's
-  output in that format is already read by the general exception scanner,
-  message included; an issue pasting the same block yields no exception at
-  all, so the two sides parse one format differently. Gradle's DEFAULT
-  output is read from both sides and that is what the end-to-end example
-  relies on. Wiring up the full format was tried and reverted: the
-  issue-side reader is anchored on the line under the first `FAILED` line
-  while the run side keeps the last exception it sees, so a log with
-  several failing tests of different types would compare two different
-  exceptions and downgrade a real reproduction to `PARTIAL`. Doing it
-  safely means making both sides agree on WHICH failure they describe,
-  which is a bigger change than the reader itself.
+- Compare EVERY failure a build produced, not one of them. A Gradle build
+  that fails four tests with two exception types is reduced to a single
+  expected and a single observed exception, chosen by the test the issue
+  named. That is right when the issue is about one test, which is the
+  common case, and it throws away real evidence when an issue reports a
+  whole suite going red. The signature model holds one exception, so this
+  means teaching the comparison to hold a set and deciding what a partial
+  overlap of two sets should be called.
 - Verify a committed Gradle workspace with a WRAPPER end to end.
   `examples/gradleshop` has no `gradlew`, so it exercises the
   `gradle:8-jdk21` image and the `gradle` on PATH. The wrapper path picks
@@ -74,9 +70,10 @@ implemented today; the README only documents what works now.
   header under its `FAILED` line and the JVM trace extractor anchors a
   header at column zero, so the frames underneath currently attach to no
   trace. Measured on a real run: the type and message are read, the
-  frames are not. The fix is a positionally anchored header, the same
-  shape as `gradle_exception`, rather than loosening the column-zero
-  anchor for every language.
+  frames are not. `gradle_failures` already walks each block and knows
+  where its header is, so this is extending that walk to the indented
+  `at ...` lines below it rather than loosening the column-zero anchor
+  for every language.
 - Ruby backtraces, now the last mainstream runtime whose stack is unread.
 
 ## Reproduction verification

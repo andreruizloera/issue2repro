@@ -263,7 +263,15 @@ def decide(expected: FailureSignature, outcome: RunOutcome) -> Verification:
     reproduction command did not run to completion and whatever is in the
     output is not evidence about the bug.
     """
-    observed = observed_signature(outcome.output, expect_type=expected.exception_type)
+    # The issue's own Gradle block is named first and the rest of the tests it
+    # points at follow, so a run that failed several tests reports the one the
+    # issue was about rather than whichever Gradle happened to print first.
+    prefer = [expected.gradle_test, *expected.tests] if expected.gradle_test else expected.tests
+    observed = observed_signature(
+        outcome.output,
+        expect_type=expected.exception_type,
+        expect_tests=prefer,
+    )
 
     if outcome.timed_out:
         return Verification(

@@ -6,17 +6,32 @@ Everything here is text in, verdict out. No subprocess, no Docker, no clone.
 from issue2repro.extract import extract_signals
 from issue2repro.models import FailureSignature, Signals, StackFrame, StackTrace
 from issue2repro.signature import (
+    GradleFailure,
     compare_frames,
     compare_messages,
     compare_signatures,
     expected_signature,
     gradle_exception,
+    gradle_failures,
     observed_frames,
     observed_signature,
     pytest_frames,
     runner_tests,
     verdict_from_match,
 )
+
+
+def _gradle_block(output: str, header: str) -> str:
+    """The one failing test's block a reporter would paste out of a build log.
+
+    Everything from that test's FAILED line down to the next blank line,
+    which is where Gradle ends a block.
+    """
+    lines = output.splitlines()
+    start = lines.index(header)
+    end = next(i for i in range(start + 1, len(lines)) if not lines[i].strip())
+    return "\n".join(lines[start:end]) + "\n"
+
 
 PYTEST_OUTPUT = """\
 =================================== FAILURES ===================================
@@ -448,7 +463,9 @@ class TestGradleTests:
         assert runner_tests(line)[0] == ["WhenEmpty::totalIsZero"]
 
     def test_gradle_exception_type_is_read(self, jvm_gradle_test):
-        assert gradle_exception(jvm_gradle_test) == ("java.lang.NullPointerException", None)
+        assert gradle_exception(jvm_gradle_test) == GradleFailure(
+            "PricingTest::unknownCouponIsIgnored", "java.lang.NullPointerException", None
+        )
 
     def test_the_message_is_left_unknown_rather_than_invented(self, jvm_gradle_test):
         """Gradle prints no message, so none is reported."""
@@ -500,38 +517,140 @@ class TestGradleTests:
         assert observed.exception_type == "java.lang.NullPointerException"
         assert compare_signatures(expected, observed).exception == "mismatch"
 
-    def test_the_full_exception_format_is_deliberately_not_read_here(
-        self, jvm_gradle_full_exception
-    ):
-        """The asymmetry is only closed for Gradle's DEFAULT output.
+    def test_the_full_exception_format_is_read_from_an_issue_too(self, jvm_gradle_full_exception):
+        """An issue quoting `exceptionFormat "full"` output names its exception.
 
-        Under `testLogging { exceptionFormat "full" }` a RUN's output is
-        readable by the general exception scanner and the issue side still
-        reads nothing, so the two sides remain asymmetric for that format.
-        Closing it was tried and reverted, because the two sides pick a
-        different failure when several tests fail: the reader above returns
-        the FIRST failing test's exception and the general scanner keeps the
-        LAST, and this fixture has four failures with two different types.
-        Wiring it up would turn a real reproduction into a PARTIAL. It is a
-        ROADMAP item, and this test is what will fail when it is done.
+        This used to read nothing: the general exception scanner handles the
+        full format for a RUN, but the issue side only ever read a recognized
+        stack trace, and the JVM extractor anchors a header at column zero
+        while Gradle indents it under the FAILED line.
         """
         text = jvm_gradle_full_exception
-        # The narrow reader does not fire: its line needs a trailing
-        # `at File.java:12`, and the full format prints `: message` instead.
-        assert gradle_exception(text) is None
-        assert expected_signature(extract_signals(text), text).exception_type is None
-        # A reader anchored the same way would return the FIRST failing
-        # test's type, which is not what the run side reports.
-        assert text.index("NullPointerException") < text.index("AssertionFailedError")
-        assert observed_signature(text).exception_type == "org.opentest4j.AssertionFailedError"
+        signature = expected_signature(extract_signals(text), text)
+        assert signature.exception_type == "java.lang.NullPointerException"
+        assert signature.exception_message == (
+            'Cannot invoke "java.lang.Integer.intValue()" because the return value of '
+            '"java.util.Map.get(Object)" is null'
+        )
+        assert "Gradle failure line in the issue" in signature.sources
+
+    def test_both_test_logging_formats_report_the_same_failure(
+        self, jvm_gradle_test, jvm_gradle_full_exception
+    ):
+        """The same four failures, captured two ways, name the same exception.
+
+        Measured against the shipped code before this change: the default
+        format reported `java.lang.NullPointerException` and the full format
+        reported `org.opentest4j.AssertionFailedError`, for the same build.
+        The general scanner reads the whole log and keeps the LAST exception
+        in it, so which type the tool named depended on the reporter's
+        testLogging block rather than on the failure.
+        """
+        assert observed_signature(jvm_gradle_test).exception_type == (
+            observed_signature(jvm_gradle_full_exception).exception_type
+        )
+        default = expected_signature(extract_signals(jvm_gradle_test), jvm_gradle_test)
+        full = expected_signature(
+            extract_signals(jvm_gradle_full_exception), jvm_gradle_full_exception
+        )
+        assert default.exception_type == full.exception_type == "java.lang.NullPointerException"
+        # The full format is what buys the message; the default format prints
+        # a source location there instead, and none is invented for it.
+        assert default.exception_message is None
+        assert full.exception_message is not None
+
+    def test_every_failing_block_is_parsed_with_the_test_it_belongs_to(
+        self, jvm_gradle_full_exception
+    ):
+        """A build fails several tests at once, with more than one type."""
+        assert [(f.test, f.exception_type) for f in gradle_failures(jvm_gradle_full_exception)] == [
+            ("PricingTest::unknownCouponIsIgnored", "java.lang.NullPointerException"),
+            ("ShippingTest::flatRateUnderThreshold", "org.opentest4j.AssertionFailedError"),
+            ("ShippingTest::flatRateUnderThreshold", "org.opentest4j.AssertionFailedError"),
+            ("ShippingTest::freeOverFiftyDollars", "org.opentest4j.AssertionFailedError"),
+        ]
+
+    def test_the_run_reports_the_failure_the_issue_pointed_at(self, jvm_gradle_full_exception):
+        """A reporter quotes ONE failing test; the run fails four.
+
+        Without choosing by test, the run side answers with whichever block
+        Gradle printed first and a real reproduction compares as PARTIAL.
+        The negative control below is the same call with the preference
+        dropped, so this test fails if the alignment stops doing anything.
+        """
+        run = jvm_gradle_full_exception
+        issue = _gradle_block(run, "ShippingTest > freeOverFiftyDollars() FAILED")
+        expected = expected_signature(extract_signals(issue), issue)
+        assert expected.exception_type == "org.opentest4j.AssertionFailedError"
+        assert expected.gradle_test == "ShippingTest::freeOverFiftyDollars"
+
+        aligned = observed_signature(run, expect_tests=[expected.gradle_test, *expected.tests])
+        assert aligned.exception_type == "org.opentest4j.AssertionFailedError"
+        assert aligned.exception_message == "expected: <0> but was: <599>"
+        assert compare_signatures(expected, aligned).exception == "match"
+
+        unaligned = observed_signature(run)
+        assert unaligned.exception_type == "java.lang.NullPointerException"
+        assert compare_signatures(expected, unaligned).exception == "mismatch"
+
+    def test_a_full_format_issue_and_run_disagreeing_is_not_a_reproduction(
+        self, jvm_gradle_full_exception
+    ):
+        """The default format's guard, now measurable for the full format.
+
+        Before this change the issue side read no exception from a full
+        format log, so the comparison rested on test names alone and an
+        issue reporting a different exception still compared as REPRODUCED.
+        """
+        run = jvm_gradle_full_exception
+        reported = run.replace("java.lang.NullPointerException", "java.lang.IllegalStateException")
+        expected = expected_signature(extract_signals(reported), reported)
+        observed = observed_signature(run, expect_tests=[expected.gradle_test, *expected.tests])
+        assert expected.exception_type == "java.lang.IllegalStateException"
+        assert observed.exception_type == "java.lang.NullPointerException"
+        assert compare_signatures(expected, observed).exception == "mismatch"
+
+    def test_neither_first_nor_last_is_the_rule(
+        self, jvm_gradle_full_exception, jvm_gradle_full_reported_last
+    ):
+        """Two real captures with the reported failure at opposite ends.
+
+        The issue in both cases is the NullPointerException. In one capture
+        Gradle printed it first and in the other it printed it second, so a
+        rule that reads by position is wrong on one of the two whichever
+        position it picks. Only choosing by the test the issue named is
+        right on both, and that is what this asserts.
+        """
+        named = ["PricingTest::unknownCouponIsIgnored"]
+        for output in (jvm_gradle_full_exception, jvm_gradle_full_reported_last):
+            assert (
+                observed_signature(output, expect_tests=named).exception_type
+                == "java.lang.NullPointerException"
+            )
+        # And the positions really are opposite, so the loop above is not
+        # passing because the two fixtures are the same shape.
+        first = [f.exception_type for f in gradle_failures(jvm_gradle_full_exception)][0]
+        last = [f.exception_type for f in gradle_failures(jvm_gradle_full_reported_last)][-1]
+        assert first == last == "java.lang.NullPointerException"
+        assert (
+            gradle_failures(jvm_gradle_full_reported_last)[0].exception_type
+            == "org.opentest4j.AssertionFailedError"
+        )
+
+    def test_an_exception_with_no_message_is_still_read(self):
+        """The full format prints a bare header when the JVM had no message."""
+        text = "PricingTest > boom() FAILED\n    java.lang.NullPointerException\n\n"
+        assert gradle_exception(text) == GradleFailure(
+            "PricingTest::boom", "java.lang.NullPointerException", None
+        )
 
     def test_exception_format_full_buys_a_message_but_not_frames(self, jvm_gradle_full_exception):
         """Pins what `testLogging { exceptionFormat "full" }` actually does.
 
         The README states this, so it is measured here rather than
-        asserted there. The setting does print a real stack trace, and the
-        type and message become readable from it, but the frames still
-        attach to no trace: Gradle indents the exception header under the
+        asserted there. The setting does print a real stack trace, so the
+        message becomes readable where the default format has none, but the
+        frames still attach to no trace: Gradle indents them under the
         FAILED line and the JVM extractor anchors a header at column zero.
         Reading them is a ROADMAP item, and this test is what will fail
         when it is done.
