@@ -210,6 +210,29 @@ match is `partial`, never `reproduced`. Messages compare as `exact`,
 `different`; a different message under a matching type is enough to make
 a verdict `partial`.
 
+The tests component has a fourth value, `partial`, for an issue that
+reports several failing tests against a run that reproduced only some of
+them:
+
+```
+Verification: PARTIAL (observed by running reproduce.sh on this machine)
+  the run failed, and only part of the reported signature matched
+  expected (from the issue): ValueError: bad date; test_iso_date, test_iso_datetime, test_epoch_seconds
+  observed (from the run):   ValueError: bad date...; tests/test_parse.py::test_iso_date
+  exception: match
+  message:   exact
+  tests:     partial (1 of 4: test_iso_date)
+  note: the issue reports 4 failing test(s) and the run reproduced 1; test_iso_datetime, test_epoch_seconds, test_rfc2822 did not fail
+```
+
+That case is worth naming separately because the exception and the
+message can both still agree: the one test that does reproduce raises
+exactly what the issue reported. Nothing else in the comparison objects,
+so counting any overlap at all as a match made a run that reproduced one
+of four reported failures produce the same output, and the same exit 0,
+as one that reproduced all four. A partial component alone is enough to
+downgrade the verdict, without any mismatch anywhere.
+
 #### Which frame, and which part of it
 
 Only the innermost frame is compared, the one the exception was raised

@@ -27,14 +27,18 @@ implemented today; the README only documents what works now.
   gives. No install step is generated because both build tools resolve
   inside the task they run and a warm-up goal (`dependency:go-offline`)
   fails on some real projects.
-- Compare EVERY failure a build produced, not one of them. A Gradle build
-  that fails four tests with two exception types is reduced to a single
-  expected and a single observed exception, chosen by the test the issue
-  named. That is right when the issue is about one test, which is the
-  common case, and it throws away real evidence when an issue reports a
-  whole suite going red. The signature model holds one exception, so this
-  means teaching the comparison to hold a set and deciding what a partial
-  overlap of two sets should be called.
+- Compare every EXCEPTION a build produced, not one of them. Half of this
+  is done: the failing TESTS were already carried as a set on both sides
+  and are now compared as one, so an issue reporting four failing tests
+  against a run that reproduced one reports `partial` rather than
+  `reproduced`. The exception side still reduces to a single expected and
+  a single observed type, chosen by the test the issue named. That is
+  right when the issue is about one test, which is the common case, and it
+  still throws away evidence when a build fails with two distinct
+  exception types and only one of them reproduces: the tests component
+  catches that today only because the tests differ too. Doing it properly
+  means the signature model holding a set of exceptions and deciding what
+  a partial overlap of two such sets should be called.
 - Verify a committed Gradle workspace with a WRAPPER end to end.
   `examples/gradleshop` has no `gradlew`, so it exercises the
   `gradle:8-jdk21` image and the `gradle` on PATH. The wrapper path picks

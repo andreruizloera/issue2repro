@@ -815,8 +815,21 @@ def compare_signatures(expected: FailureSignature, observed: FailureSignature) -
         # a unittest id, and a cargo path all compare as the function they
         # name rather than as the string their runner happened to print.
         matched = [name for name in expected.tests if _test_name(name) in observed_names]
+        unmatched = [name for name in expected.tests if _test_name(name) not in observed_names]
         match.matched_tests = matched
-        if matched:
+        match.unmatched_tests = unmatched
+        if matched and unmatched:
+            # Some but not all. An issue reporting that a whole suite went
+            # red, against a run where one of those tests still fails and
+            # the rest now pass, is not the reported failure: it is part of
+            # it. Counting any overlap as a match made those two runs
+            # produce identical output.
+            match.tests = "partial"
+            match.notes.append(
+                f"the issue reports {len(expected.tests)} failing test(s) and the run "
+                f"reproduced {len(matched)}; {', '.join(unmatched[:3])} did not fail"
+            )
+        elif matched:
             match.tests = "match"
         else:
             match.tests = "mismatch"
@@ -834,10 +847,18 @@ def verdict_from_match(match: SignatureMatch) -> str:
     A single mismatch alongside a match is "partial", never "reproduced":
     the run failed in a way that is only partly the reported failure, and
     saying so is the point of the command.
+
+    A component that is itself "partial" is enough on its own, without any
+    mismatch anywhere: reproducing one of four reported failing tests is a
+    partial reproduction even when the exception and the message agree,
+    because the three that no longer fail are the part that did not
+    reproduce.
     """
     components = match.components
     matches = sum(1 for c in components if c == "match" or c == "exact" or c == "close")
     mismatches = sum(1 for c in components if c in ("mismatch", "different"))
+    if any(c == "partial" for c in components):
+        return "partial"
     if matches and mismatches:
         return "partial"
     if matches:

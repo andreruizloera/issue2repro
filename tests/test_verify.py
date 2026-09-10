@@ -322,3 +322,48 @@ class TestRendering:
         text = "\n".join(render_verification(verification))
         assert "note:" in text
         assert "TypeError" in text
+
+
+class TestPartialSuiteExitCode:
+    """The consequence of the tests component gaining a "partial" value.
+
+    A run that reproduced one of four reported failures used to be a
+    REPRODUCED verdict and exit 0, which is the answer a CI gate acts on.
+    """
+
+    SUITE = FailureSignature(
+        exception_type="ValueError",
+        exception_message="bad date",
+        tests=["test_iso_date", "test_iso_datetime", "test_epoch_seconds", "test_rfc2822"],
+    )
+
+    ONE_OF_FOUR = (
+        "=========================== short test summary info ===========================\n"
+        "FAILED tests/test_parse.py::test_iso_date - ValueError: bad date\n"
+        "=========================== 1 failed, 3 passed in 0.29s =======================\n"
+    )
+
+    ALL_FOUR = (
+        "=========================== short test summary info ===========================\n"
+        "FAILED tests/test_parse.py::test_iso_date - ValueError: bad date\n"
+        "FAILED tests/test_parse.py::test_iso_datetime - ValueError: bad date\n"
+        "FAILED tests/test_parse.py::test_epoch_seconds - ValueError: bad date\n"
+        "FAILED tests/test_parse.py::test_rfc2822 - ValueError: bad date\n"
+        "=========================== 4 failed in 0.31s =================================\n"
+    )
+
+    def test_one_of_four_exits_nonzero(self):
+        result = decide(self.SUITE, outcome(output=self.ONE_OF_FOUR))
+        assert result.verdict == "partial"
+        assert EXIT_CODES[result.verdict] == 1
+
+    def test_all_four_still_exits_zero(self):
+        result = decide(self.SUITE, outcome(output=self.ALL_FOUR))
+        assert result.verdict == "reproduced"
+        assert EXIT_CODES[result.verdict] == 0
+
+    def test_the_rendered_block_says_how_many_of_how_many(self):
+        result = decide(self.SUITE, outcome(output=self.ONE_OF_FOUR))
+        rendered = "\n".join(render_verification(result))
+        assert "tests:     partial (1 of 4: test_iso_date)" in rendered
+        assert "did not fail" in rendered

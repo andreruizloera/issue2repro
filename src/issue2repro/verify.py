@@ -435,6 +435,12 @@ def render_verification(verification: Verification) -> list[str]:
         lines.append("  frames:    mismatch")
     if match.tests == "match":
         lines.append(f"  tests:     match ({', '.join(match.matched_tests)})")
+    elif match.tests == "partial":
+        lines.append(
+            f"  tests:     partial ({len(match.matched_tests)} of "
+            f"{len(match.matched_tests) + len(match.unmatched_tests)}: "
+            f"{', '.join(match.matched_tests)})"
+        )
     elif match.tests == "mismatch":
         lines.append("  tests:     mismatch")
     for note in match.notes:

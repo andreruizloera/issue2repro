@@ -1160,3 +1160,121 @@ class TestQualifiedExceptionNames:
         expected = FailureSignature(exception_type="HTTPError")
         observed = FailureSignature(exception_type="requests.exceptions.HTTPError")
         assert compare_signatures(expected, observed).exception == "match"
+
+
+class TestPartialSuiteReproduction:
+    """An issue reporting several failing tests, against a run that
+    reproduced only some of them.
+
+    Before this, any overlap at all counted as a full match on the tests
+    component, so a run that reproduced ONE of four reported failures and a
+    run that reproduced all four produced the same component tuple and the
+    same REPRODUCED verdict, exit 0. There was no signal anywhere in the
+    output distinguishing them. The set was already being carried on both
+    sides for every runner; it was compared with a boolean.
+    """
+
+    PYTEST_SUITE_ISSUE = """\
+After upgrading to 2.4.0 our whole parsing suite fails.
+
+=========================== short test summary info ============================
+FAILED tests/test_parse.py::test_iso_date - ValueError: bad date
+FAILED tests/test_parse.py::test_iso_datetime - ValueError: bad date
+FAILED tests/test_parse.py::test_epoch_seconds - ValueError: bad date
+FAILED tests/test_parse.py::test_rfc2822 - ValueError: bad date
+=========================== 4 failed in 0.31s ==================================
+"""
+
+    PYTEST_ONE_OF_FOUR = """\
+=========================== short test summary info ============================
+FAILED tests/test_parse.py::test_iso_date - ValueError: bad date
+=========================== 1 failed, 3 passed in 0.29s ========================
+"""
+
+    def _match(self, issue_text: str, output: str):
+        expected = expected_signature(extract_signals(issue_text), issue_text)
+        prefer = [expected.gradle_test, *expected.tests] if expected.gradle_test else expected.tests
+        observed = observed_signature(output, expected.exception_type, prefer)
+        return expected, compare_signatures(expected, observed)
+
+    def test_one_of_four_reported_pytest_failures_is_partial(self):
+        """The defect is not Gradle-specific. It sits in the generic
+        comparison, so it reaches every runner the tool supports."""
+        expected, match = self._match(self.PYTEST_SUITE_ISSUE, self.PYTEST_ONE_OF_FOUR)
+        assert len(expected.tests) == 4
+        assert match.tests == "partial"
+        assert match.matched_tests == ["test_iso_date"]
+        assert match.unmatched_tests == [
+            "test_iso_datetime",
+            "test_epoch_seconds",
+            "test_rfc2822",
+        ]
+        assert verdict_from_match(match) == "partial"
+
+    def test_all_four_reported_pytest_failures_still_reproduce(self):
+        """The control. A fix that only downgrades verdicts is not a fix."""
+        _, match = self._match(self.PYTEST_SUITE_ISSUE, self.PYTEST_SUITE_ISSUE)
+        assert match.tests == "match"
+        assert match.unmatched_tests == []
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_the_note_names_what_did_not_fail(self):
+        """The evidence that was being thrown away: which reported tests the
+        run did not reproduce. A count alone does not let a reader act."""
+        _, match = self._match(self.PYTEST_SUITE_ISSUE, self.PYTEST_ONE_OF_FOUR)
+        note = next(n for n in match.notes if "did not fail" in n)
+        assert "4 failing test(s)" in note
+        assert "reproduced 1" in note
+        assert "test_rfc2822" in note
+
+    def test_gradle_one_of_three_reported_tests_is_partial(self, jvm_gradle_full_exception):
+        """The same on the runner the roadmap row was written about, on this
+        project's own real four-failure capture. The three shipping
+        assertions were fixed and the NullPointerException remains."""
+        lines = jvm_gradle_full_exception.splitlines(keepends=True)
+        only_npe = "".join(lines[:16]) + "\n4 tests completed, 1 failed\n\nBUILD FAILED in 9s\n"
+        expected, match = self._match(jvm_gradle_full_exception, only_npe)
+        # Four FAILED blocks, three distinct tests: the two parametrized
+        # cases of flatRateUnderThreshold reduce to one name.
+        assert len(expected.tests) == 3
+        # The exception and message still agree, which is exactly why this
+        # used to read REPRODUCED: nothing else in the tuple objected.
+        assert match.exception == "match"
+        assert match.message == "exact"
+        assert match.tests == "partial"
+        assert match.matched_tests == ["PricingTest::unknownCouponIsIgnored"]
+        assert verdict_from_match(match) == "partial"
+
+    def test_gradle_all_failures_reproducing_is_still_reproduced(self, jvm_gradle_full_exception):
+        _, match = self._match(jvm_gradle_full_exception, jvm_gradle_full_exception)
+        assert match.tests == "match"
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_a_partial_component_alone_is_enough_to_downgrade(self):
+        """No mismatch anywhere in the tuple, and the verdict is still
+        partial. This is the arm that could not exist before, because
+        `partial` was not a value any component could take."""
+        expected = FailureSignature(tests=["test_a", "test_b"])
+        observed = FailureSignature(tests=["test_a"])
+        match = compare_signatures(expected, observed)
+        assert match.components == ("unknown", "unknown", "unknown", "partial")
+        assert not any(c in ("mismatch", "different") for c in match.components)
+        assert verdict_from_match(match) == "partial"
+
+    def test_no_overlap_is_still_a_mismatch_not_a_partial(self):
+        """Partial is some-but-not-all. None-at-all keeps its old verdict."""
+        expected = FailureSignature(tests=["test_a", "test_b"])
+        observed = FailureSignature(tests=["test_c"])
+        match = compare_signatures(expected, observed)
+        assert match.tests == "mismatch"
+        assert match.unmatched_tests == ["test_a", "test_b"]
+        assert verdict_from_match(match) == "different-failure"
+
+    def test_a_single_reported_test_reproducing_is_not_partial(self):
+        """The common case, and the one that must not regress: one reported
+        test, one reproduced, nothing unmatched."""
+        expected = FailureSignature(tests=["test_a"])
+        observed = FailureSignature(tests=["test_a", "test_unrelated"])
+        match = compare_signatures(expected, observed)
+        assert match.tests == "match"
+        assert verdict_from_match(match) == "reproduced"

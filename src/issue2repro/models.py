@@ -177,6 +177,15 @@ class SignatureMatch:
 
     Each component is "match", "mismatch", or "unknown"; "unknown" means
     there was nothing on one side to compare, which is never evidence.
+
+    ``tests`` has a fourth value, "partial", for the case an issue reports
+    several failing tests and the run reproduced only some of them. That
+    case used to read "match", because any overlap at all counted, so a run
+    that reproduced one of four reported failures was indistinguishable
+    from one that reproduced all four: both produced the same component
+    tuple and the same REPRODUCED verdict. ``unmatched_tests`` names the
+    reported tests the run did not fail, which is the evidence that
+    distinguishes them.
     """
 
     exception: str = "unknown"
@@ -184,6 +193,7 @@ class SignatureMatch:
     frames: str = "unknown"
     tests: str = "unknown"
     matched_tests: list[str] = field(default_factory=list)
+    unmatched_tests: list[str] = field(default_factory=list)
     matched_frame: str = ""
     notes: list[str] = field(default_factory=list)
 
