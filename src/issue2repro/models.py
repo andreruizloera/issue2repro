@@ -144,9 +144,19 @@ class FailureSignature:
     type, so which block was read is part of the answer: the run side is
     given the issue side's ``gradle_test`` so that both sides describe the
     same failure rather than each picking by position.
+
+    ``exception_type`` is the PRIMARY exception, the one this side's rules
+    single out for the message and frame comparison. ``exception_types`` is
+    every exception type this side showed, in the order they appeared and
+    deduplicated, because a failing build usually raises more than one. The
+    primary is always one of them. Keeping both is what lets a run that
+    raised only some of the reported exception types be called a partial
+    reproduction instead of a full one: see
+    :func:`issue2repro.signature.compare_signatures`.
     """
 
     exception_type: str | None = None
+    exception_types: list[str] = field(default_factory=list)
     exception_message: str | None = None
     message_truncated: bool = False
     frames: list[StackFrame] = field(default_factory=list)
@@ -186,12 +196,20 @@ class SignatureMatch:
     tuple and the same REPRODUCED verdict. ``unmatched_tests`` names the
     reported tests the run did not fail, which is the evidence that
     distinguishes them.
+
+    ``exception`` has the same fourth value for the same reason, one layer
+    down: an issue reporting two distinct exception types against a run that
+    raised only one of them used to read "match", because only the primary
+    type was compared. ``unmatched_exceptions`` names the reported types that
+    did not appear anywhere in the run's output.
     """
 
     exception: str = "unknown"
     message: str = "unknown"
     frames: str = "unknown"
     tests: str = "unknown"
+    matched_exceptions: list[str] = field(default_factory=list)
+    unmatched_exceptions: list[str] = field(default_factory=list)
     matched_tests: list[str] = field(default_factory=list)
     unmatched_tests: list[str] = field(default_factory=list)
     matched_frame: str = ""

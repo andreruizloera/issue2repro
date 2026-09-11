@@ -425,7 +425,13 @@ def render_verification(verification: Verification) -> list[str]:
     expected, observed, match = verification.expected, verification.observed, verification.match
     lines.append(f"  expected (from the issue): {expected.describe()}")
     lines.append(f"  observed (from the run):   {observed.describe()}")
-    if match.exception != "unknown":
+    if match.exception == "partial":
+        lines.append(
+            f"  exception: partial ({len(match.matched_exceptions)} of "
+            f"{len(match.matched_exceptions) + len(match.unmatched_exceptions)}: "
+            f"{', '.join(match.matched_exceptions)})"
+        )
+    elif match.exception != "unknown":
         lines.append(f"  exception: {match.exception}")
     if match.message != "unknown":
         lines.append(f"  message:   {match.message}")

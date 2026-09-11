@@ -1,0 +1,37 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________________________________ test_widen __________________________________
+
+value = None
+
+    def widen(value):
+        table = {}
+        try:
+>           return table["span"]
+                   ^^^^^^^^^^^^^
+E           KeyError: 'span'
+
+tests/test_widen.py:4: KeyError
+
+The above exception was the direct cause of the following exception:
+
+    def test_widen():
+>       widen(None)
+
+tests/test_widen.py:10: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+value = None
+
+    def widen(value):
+        table = {}
+        try:
+            return table["span"]
+        except KeyError as exc:
+>           raise ValueError("width must be positive") from exc
+E           ValueError: width must be positive
+
+tests/test_widen.py:6: ValueError
+=========================== short test summary info ============================
+FAILED tests/test_widen.py::test_widen - ValueError: width must be positive
+1 failed in 0.02s

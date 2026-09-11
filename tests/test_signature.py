@@ -19,6 +19,7 @@ from issue2repro.signature import (
     runner_tests,
     verdict_from_match,
 )
+from tests.conftest import load_output
 
 
 def _gradle_block(output: str, header: str) -> str:
@@ -1237,9 +1238,17 @@ FAILED tests/test_parse.py::test_iso_date - ValueError: bad date
         # Four FAILED blocks, three distinct tests: the two parametrized
         # cases of flatRateUnderThreshold reduce to one name.
         assert len(expected.tests) == 3
-        # The exception and message still agree, which is exactly why this
-        # used to read REPRODUCED: nothing else in the tuple objected.
-        assert match.exception == "match"
+        # UPDATED 2026-09-11. This assertion read `match.exception == "match"`,
+        # above a comment saying the exception component was "exactly why this
+        # used to read REPRODUCED: nothing else in the tuple objected". It
+        # objects now: the truncated run kept only the NullPointerException
+        # block, so the AssertionFailedError this log also reports never
+        # appears, and the exception component says so on its own. The tests
+        # component was carrying this case alone and that was the defect the
+        # next cycle fixed, so the assertion it was documenting had to move
+        # with it. The message still compares exact, on the primary pair.
+        assert match.exception == "partial"
+        assert match.unmatched_exceptions == ["org.opentest4j.AssertionFailedError"]
         assert match.message == "exact"
         assert match.tests == "partial"
         assert match.matched_tests == ["PricingTest::unknownCouponIsIgnored"]
@@ -1278,3 +1287,248 @@ FAILED tests/test_parse.py::test_iso_date - ValueError: bad date
         match = compare_signatures(expected, observed)
         assert match.tests == "match"
         assert verdict_from_match(match) == "reproduced"
+
+
+class TestPartialExceptionReproduction:
+    """An issue reporting several distinct exception types, against a run
+    that raised only some of them.
+
+    One layer below TestPartialSuiteReproduction and the same defect. Both
+    signatures carried a single ``exception_type``, the LAST one recognized,
+    so a build that failed with two types was compared on one of them. The
+    tests component caught that only when the tests differed too, which they
+    need not: the same tests can fail with different exceptions.
+
+    The run outputs here are real `pytest -q` captures of the shapes they
+    describe, not hand-written approximations of them; the chained-exception
+    control in particular only works because a real pytest run prints BOTH
+    exception lines of a `raise ... from ...`, which was measured before this
+    comparison was written rather than assumed.
+    """
+
+    TWO_TRACEBACK_ISSUE = """\
+Two of our tests blow up on 0.4.0.
+
+```
+Traceback (most recent call last):
+  File "tests/test_widen.py", line 11, in test_widen
+    widen(None)
+  File "src/app/core.py", line 7, in widen
+    raise ValueError("width must be positive")
+ValueError: width must be positive
+```
+
+and
+
+```
+Traceback (most recent call last):
+  File "tests/test_narrow.py", line 22, in test_narrow
+    narrow({})
+  File "src/app/core.py", line 19, in narrow
+    raise KeyError("span")
+KeyError: 'span'
+```
+"""
+
+    # The same two tests fail, but both with KeyError, so the reported
+    # ValueError appears nowhere. The tests component cannot see this.
+    SAME_TESTS_ONE_TYPE = """\
+=========================== short test summary info ============================
+FAILED tests/test_widen.py::test_widen - KeyError: 'span'
+FAILED tests/test_narrow.py::test_narrow - KeyError: 'span'
+=========================== 2 failed in 0.12s ==================================
+"""
+
+    BOTH_TYPES = """\
+=========================== short test summary info ============================
+FAILED tests/test_widen.py::test_widen - ValueError: width must be positive
+FAILED tests/test_narrow.py::test_narrow - KeyError: 'span'
+=========================== 2 failed in 0.12s ==================================
+"""
+
+    def _match(self, issue_text: str, output: str):
+        expected = expected_signature(extract_signals(issue_text), issue_text)
+        prefer = [expected.gradle_test, *expected.tests] if expected.gradle_test else expected.tests
+        observed = observed_signature(output, expected.exception_type, prefer)
+        return expected, observed, compare_signatures(expected, observed)
+
+    def test_same_tests_different_exceptions_is_partial(self):
+        """The case the roadmap row named. Every reported test fails, so the
+        tests component reads `match`, and the verdict used to be REPRODUCED
+        with no note anywhere on a run where one of the two reported
+        exceptions never happened."""
+        expected, _, match = self._match(self.TWO_TRACEBACK_ISSUE, self.SAME_TESTS_ONE_TYPE)
+        assert expected.exception_types == ["ValueError", "KeyError"]
+        assert match.tests == "match"  # the component that used to carry this
+        assert match.exception == "partial"
+        assert match.matched_exceptions == ["KeyError"]
+        assert match.unmatched_exceptions == ["ValueError"]
+        assert verdict_from_match(match) == "partial"
+
+    def test_the_note_names_the_exception_that_did_not_appear(self):
+        """A count alone does not let a reader act, which is the rule the
+        tests-side note already follows."""
+        _, _, match = self._match(self.TWO_TRACEBACK_ISSUE, self.SAME_TESTS_ONE_TYPE)
+        note = next(n for n in match.notes if "did not appear" in n)
+        assert "2 exception type(s)" in note
+        assert "raised 1" in note
+        assert "ValueError" in note
+
+    def test_both_reported_exceptions_appearing_is_still_reproduced(self):
+        """CONTROL. A change that only downgrades verdicts is not a fix."""
+        _, observed, match = self._match(self.TWO_TRACEBACK_ISSUE, self.BOTH_TYPES)
+        assert sorted(observed.exception_types) == ["KeyError", "ValueError"]
+        assert match.exception == "match"
+        assert match.unmatched_exceptions == []
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_one_reported_exception_is_never_partial(self):
+        """CONTROL. The common case: one type reported, one raised, plus
+        whatever else the run happened to print. An extra exception the issue
+        never mentioned is not counted against the reproduction, exactly as an
+        extra failing test is not."""
+        expected = FailureSignature(
+            exception_type="ValueError",
+            exception_types=["ValueError"],
+            tests=["test_a"],
+        )
+        observed = FailureSignature(
+            exception_type="ValueError",
+            exception_types=["RuntimeError", "ValueError"],
+            tests=["test_a"],
+        )
+        match = compare_signatures(expected, observed)
+        assert match.exception == "match"
+        assert match.unmatched_exceptions == []
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_a_chained_exception_in_the_issue_is_not_a_partial(self):
+        """CONTROL, and the hazard this feature could have introduced. A
+        `raise X from Y` traceback is split into TWO traces by the extractor,
+        so the issue side reports two types for ONE failure. A real pytest run
+        of that chain prints both exception lines, so both are found and the
+        verdict stays `reproduced`. That pytest prints both was MEASURED before
+        this comparison was written, not assumed: the run side here is
+        `tests/fixtures/python_chained_exception.txt`, the verbatim output of
+        `pytest -q --color=no` on a two-line `raise ... from ...` under pytest
+        8.4.2 and CPython 3.12, and it is kept in a file because two of its
+        lines end in a space that ruff would otherwise strip."""
+        issue = """\
+Fails on 0.4.0:
+
+```
+Traceback (most recent call last):
+  File "tests/test_widen.py", line 4, in widen
+    return table["span"]
+KeyError: 'span'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "tests/test_widen.py", line 10, in test_widen
+    widen(None)
+  File "tests/test_widen.py", line 6, in widen
+    raise ValueError("width must be positive") from exc
+ValueError: width must be positive
+```
+"""
+        run = load_output("python_chained_exception.txt")
+        expected, observed, match = self._match(issue, run)
+        assert expected.exception_types == ["KeyError", "ValueError"]
+        assert observed.exception_types == ["KeyError", "ValueError"]
+        assert match.exception == "match"
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_a_mismatch_is_never_upgraded_by_the_set(self):
+        """The set is consulted ONLY when the primary types already agree, so
+        it can narrow a match and never widen a mismatch. Here the run's
+        primary is a different type and the reported one appears in the set
+        anyway; the verdict must stay different-failure rather than becoming
+        a match because a stray line mentioned it."""
+        expected = FailureSignature(exception_type="ValueError", exception_types=["ValueError"])
+        observed = FailureSignature(
+            exception_type="RuntimeError", exception_types=["ValueError", "RuntimeError"]
+        )
+        match = compare_signatures(expected, observed)
+        assert match.exception == "mismatch"
+        assert verdict_from_match(match) == "different-failure"
+
+    def test_a_qualified_type_satisfies_a_bare_reported_one(self):
+        """The JVM rule reaches the set too: an issue writing
+        `NullPointerException` is satisfied by a run printing
+        `java.lang.NullPointerException`, and must not be reported as a type
+        that did not appear."""
+        expected = FailureSignature(
+            exception_type="IllegalStateException",
+            exception_types=["NullPointerException", "IllegalStateException"],
+        )
+        observed = FailureSignature(
+            exception_type="java.lang.IllegalStateException",
+            exception_types=[
+                "java.lang.NullPointerException",
+                "java.lang.IllegalStateException",
+            ],
+        )
+        match = compare_signatures(expected, observed)
+        assert match.exception == "match"
+        assert match.unmatched_exceptions == []
+
+    def test_every_pytest_summary_line_contributes_a_type(self):
+        """Under `--tb=no`, or in a paste that kept only the tail of a run,
+        the short summary is the only place an exception type appears. Reading
+        only the first line would report a run that reproduced BOTH reported
+        types as a partial reproduction."""
+        observed = observed_signature(self.BOTH_TYPES)
+        assert observed.exception_types == ["ValueError", "KeyError"]
+        assert observed.exception_type == "ValueError"
+        assert observed.message_truncated is True
+
+    def test_the_run_side_prefers_the_type_the_issue_named(self):
+        """A PRE-EXISTING bug, found by writing the control above rather than
+        by reading the code, and fixed with it.
+
+        The two sides chose a primary by different positions: the issue keeps
+        the LAST recognized traceback, pytest's short summary kept its FIRST
+        line. So this exact input, a clean reproduction of both reported
+        failures, compared the issue's KeyError against the run's ValueError
+        and reported `different-failure`, exit 1. The run side now prefers the
+        exception of the type the issue named, which is what
+        `gradle_exception` already does for test names.
+        """
+        expected = expected_signature(
+            extract_signals(self.TWO_TRACEBACK_ISSUE), self.TWO_TRACEBACK_ISSUE
+        )
+        assert expected.exception_type == "KeyError"  # the LAST of the two
+        # Without the preference the first summary line wins, and it is the
+        # other type:
+        assert observed_signature(self.BOTH_TYPES).exception_type == "ValueError"
+        # With it, both sides land on the same failure:
+        observed = observed_signature(self.BOTH_TYPES, expected.exception_type, expected.tests)
+        assert observed.exception_type == "KeyError"
+        assert observed.exception_message == "'span'"
+        match = compare_signatures(expected, observed)
+        assert match.exception == "match"
+        assert verdict_from_match(match) == "reproduced"
+
+    def test_the_preference_invents_nothing(self):
+        """The guard on that preference: when the run never raised the type
+        the issue named, the positional rule stands and the comparison
+        answers mismatch rather than reaching for a type that is not there."""
+        expected = expected_signature(
+            extract_signals(self.TWO_TRACEBACK_ISSUE), self.TWO_TRACEBACK_ISSUE
+        )
+        other = """\
+=========================== short test summary info ============================
+FAILED tests/test_widen.py::test_widen - TypeError: not an int
+=========================== 1 failed in 0.11s ==================================
+"""
+        observed = observed_signature(other, expected.exception_type, expected.tests)
+        assert observed.exception_type == "TypeError"
+        match = compare_signatures(expected, observed)
+        assert match.exception == "mismatch"
+        # Not "different-failure": only one of the two reported tests failed
+        # here, so the tests component is partial at the same time, and a
+        # partial component alone decides the verdict. The exception component
+        # is what this test is about, and it says mismatch.
+        assert match.tests == "partial"
+        assert verdict_from_match(match) == "partial"

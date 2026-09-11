@@ -175,6 +175,20 @@ def _split_exception(text: str) -> tuple[str | None, str | None]:
     return match["type"], message.strip() if message else None
 
 
+def _record_type(signature: FailureSignature, exc_type: str) -> None:
+    """Add one exception type to a signature's set, keeping first-seen order.
+
+    Deduplicated on the exact string, not through
+    :func:`_same_exception_type`: a log that prints both
+    ``java.lang.NullPointerException`` and the bare ``NullPointerException``
+    records both, and the comparison resolves them to one class later. Doing
+    it here instead would mean choosing which spelling to keep, and the
+    comparison has strictly more information to choose with.
+    """
+    if exc_type not in signature.exception_types:
+        signature.exception_types.append(exc_type)
+
+
 def _test_name(nodeid: str) -> str:
     """The bare test function name from a node id, parametrization stripped."""
     tail = nodeid.rsplit("::", 1)[-1]
@@ -514,6 +528,42 @@ def compare_frames(
     return "match", f"{right.symbol} in {right.path}", None
 
 
+def _choose_primary(
+    candidates: Sequence[tuple[str, str | None]],
+    expect_type: str | None,
+    fallback: int,
+) -> tuple[str, str | None] | None:
+    """Which of a run's exceptions is the one to compare in detail.
+
+    The run side and the issue side each used to pick a primary by position,
+    and by DIFFERENT positions: the issue keeps the last recognized traceback,
+    while a run's pytest short summary kept its first line. So a run that
+    reproduced a two-exception failure exactly, reported through the short
+    summary, compared the issue's second type against the run's first and
+    answered ``different-failure`` on a clean reproduction. Found 2026-09-11 by
+    writing the control for the partial-exception feature, not by reading.
+
+    The fix is the one :func:`gradle_exception` already makes for test names,
+    generalized to types: when the issue named a type, prefer the run's
+    exception of THAT type, so both sides describe the same failure. Nothing is
+    invented, the choice is only ever among exceptions this output really
+    printed, and when none of them is the type the issue named the positional
+    rule stands and the comparison speaks for itself.
+
+    ``fallback`` is the index to keep when there is no preference to apply, and
+    it preserves each caller's existing rule exactly: -1 for the line scanner
+    and the native extractors, which keep the LAST exception in the output, and
+    0 for pytest's short summary, which keeps the FIRST line.
+    """
+    if not candidates:
+        return None
+    if expect_type:
+        for candidate in candidates:
+            if _same_exception_type(expect_type, candidate[0]):
+                return candidate
+    return candidates[fallback]
+
+
 def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
     """The failure the issue describes.
 
@@ -530,9 +580,13 @@ def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
             continue
         exc_type, message = _split_exception(trace.error)
         if exc_type:
+            # The LAST recognized trace is the primary, because that is the
+            # one whose frames are kept; every type is recorded as well, so a
+            # run that raises only some of them is a partial reproduction.
             signature.exception_type = exc_type
             signature.exception_message = message
             signature.frames = outermost_first(trace)
+            _record_type(signature, exc_type)
             signature.sources.append(f"{trace.language} stack trace in the issue")
             if trace.frames and "stack frames in the issue" not in signature.sources:
                 signature.sources.append("stack frames in the issue")
@@ -560,6 +614,10 @@ def expected_signature(signals: Signals, text: str = "") -> FailureSignature:
             signature.exception_type = gradle.exception_type
             signature.exception_message = gradle.message
             signature.gradle_test = gradle.test
+            # Every failing test's type, not only the chosen block's: an issue
+            # that pastes a whole Gradle log reports every one of them.
+            for failure in gradle_failures(text):
+                _record_type(signature, failure.exception_type)
             signature.sources.append("Gradle failure line in the issue")
 
     for match in _NODE_ID.finditer(text):
@@ -598,11 +656,21 @@ def observed_signature(
     Failing tests come from pytest's short summary, and when a run printed
     none, from the other runners' formats through :func:`runner_tests`.
 
-    ``expect_type`` is a targeted fallback. The general matcher only
-    recognizes exception names with a conventional suffix, so a project's
-    ``MyBadThing`` would be invisible; when the issue names a type, that
-    exact token is also searched for. Nothing is invented: the token still
-    has to appear in the output as an exception line.
+    EVERY recognized type is recorded in ``exception_types``, and one of them
+    is singled out as the primary for the message and frame comparison. A
+    build that fails several tests usually raises more than one type, and
+    keeping only one of them is what let a run that reproduced half of a
+    reported failure read as a full reproduction.
+
+    ``expect_type`` does two jobs, and the second is newer. It is a targeted
+    fallback: the general matcher only recognizes exception names with a
+    conventional suffix, so a project's ``MyBadThing`` would be invisible, and
+    when the issue names a type that exact token is also searched for. It also
+    chooses the PRIMARY among however many exceptions this output printed, so
+    that this side and the issue side describe the same failure rather than
+    each picking by its own position rule. See :func:`_choose_primary`.
+    Nothing is invented either way: the token still has to appear in the
+    output as an exception line.
 
     ``expect_tests`` names the tests the issue pointed at, most specific
     first, and is used only to choose among several Gradle failures. See
@@ -622,8 +690,11 @@ def observed_signature(
     if gradle is not None:
         full = (gradle.exception_type, gradle.message)
         signature.gradle_test = gradle.test
+        for failure in gradle_failures(output):
+            _record_type(signature, failure.exception_type)
         signature.sources.append("Gradle failure line in the output")
     else:
+        candidates: list[tuple[str, str | None]] = []
         for line in lines:
             body = line.strip()
             e_line = _PYTEST_E_LINE.match(line)
@@ -636,12 +707,14 @@ def observed_signature(
                     exc_type = expect_type
                     message = rest.lstrip(":").strip() or None
             if exc_type:
-                full = (exc_type, message)
+                candidates.append((exc_type, message))
+                _record_type(signature, exc_type)
                 if e_line:
                     if "pytest failure detail" not in signature.sources:
                         signature.sources.append("pytest failure detail")
                 elif "exception line in the output" not in signature.sources:
                     signature.sources.append("exception line in the output")
+        full = _choose_primary(candidates, expect_type, -1)
 
     if full is None:
         # A Rust panic announces itself as "thread 'main' panicked at
@@ -653,25 +726,31 @@ def observed_signature(
         # line scanner's anchored pattern will match.
         # The extractor has already handled both; ask it rather than
         # teaching the line scanner to carry state.
+        native_candidates: list[tuple[str, str | None]] = []
         for trace in native_traces(output):
             exc_type, message = _split_exception(trace.error or "")
             if exc_type:
-                full = (exc_type, message)
+                native_candidates.append((exc_type, message))
+                _record_type(signature, exc_type)
                 source = f"{_trace_source(trace.language)} line in the output"
                 if source not in signature.sources:
                     signature.sources.append(source)
+        full = _choose_primary(native_candidates, expect_type, -1)
 
-    if full is None:
-        # Gradle is the one supported runner that prints no stack trace by
-        # default, so neither the line scanner nor the extractors above find
-        # anything in it. Its own failure line carries the type.
-        gradle = gradle_exception(output)
-        if gradle:
-            full = gradle
-            signature.sources.append("Gradle failure line in the output")
+    # A third Gradle fallback used to sit here, re-reading the failure line
+    # when nothing else had produced a type. It was DEAD and it was also the
+    # wrong shape, and both were found by measuring rather than by reading:
+    # it called `gradle_exception(output)`, which returns None exactly when
+    # the call at the top of this function returned None (they differ only in
+    # `prefer_tests`, which reorders a non-empty list), so it could never run;
+    # and it assigned the whole three-field GradleFailure to `full`, which
+    # every consumer below unpacks as two values, so `ValueError: too many
+    # values to unpack` is what it would have raised if it ever had. Removed
+    # rather than repaired, because the reachable path above it already does
+    # the job correctly.
 
     tests: list[str] = []
-    truncated_detail: tuple[str, str | None] | None = None
+    summary_details: list[tuple[str, str | None]] = []
     for line in lines:
         summary = _PYTEST_SUMMARY.match(line.strip())
         if not summary:
@@ -680,10 +759,17 @@ def observed_signature(
         if nodeid not in tests:
             tests.append(nodeid)
         detail = (summary["detail"] or "").strip()
-        if detail and truncated_detail is None:
+        if detail:
             exc_type, message = _split_exception(detail.removesuffix(_ELLIPSIS))
             if exc_type:
-                truncated_detail = (exc_type, message)
+                # Every summary line's type, not only the first. Under
+                # `--tb=no`, or in a paste that kept only the tail of a run,
+                # this block is the ONLY place a second exception type
+                # appears, and leaving the rest out would report a run that
+                # reproduced every reported type as a partial reproduction.
+                _record_type(signature, exc_type)
+                summary_details.append((exc_type, message))
+    truncated_detail = _choose_primary(summary_details, expect_type, 0)
     if tests:
         signature.sources.append("pytest short summary")
     else:
@@ -696,6 +782,7 @@ def observed_signature(
     elif truncated_detail is not None:
         signature.exception_type, signature.exception_message = truncated_detail
         signature.message_truncated = True
+        _record_type(signature, truncated_detail[0])
         signature.sources.append("pytest short summary (message may be truncated)")
 
     frames, frame_source = observed_frames(output)
@@ -761,6 +848,48 @@ def _same_exception_type(expected: str, observed: str) -> bool:
     return expected.rsplit(".", 1)[-1] == observed.rsplit(".", 1)[-1]
 
 
+def _compare_exception_sets(
+    expected: FailureSignature, observed: FailureSignature
+) -> tuple[list[str], list[str]]:
+    """Which of the issue's exception types the run raised, and which it did not.
+
+    Asymmetric on purpose, exactly like the tests component: the question is
+    whether everything the ISSUE reported showed up, so only the expected
+    types are partitioned. An extra exception the run raised and the issue
+    never mentioned is not counted against the reproduction, in the same way
+    an extra failing test is not.
+
+    This is only ever consulted when the two PRIMARY types already agree, so
+    it can turn a "match" into a "partial" and nothing else. That direction is
+    deliberate and it is the reason the set is not compared first: a build log
+    carries exception lines that are not the failure, a logged traceback from
+    a passing test or a library's own caught error among them, and letting
+    that wider set decide a MATCH would manufacture reproductions. Narrowing
+    a match cannot, because the primary pair still had to line up.
+
+    Pairing uses :func:`_same_exception_type`, not string equality, so an
+    issue's bare ``NullPointerException`` is satisfied by the run's
+    ``java.lang.NullPointerException``.
+    """
+    expected_types = expected.exception_types or (
+        [expected.exception_type] if expected.exception_type else []
+    )
+    observed_types = observed.exception_types or (
+        [observed.exception_type] if observed.exception_type else []
+    )
+    matched = [
+        left
+        for left in expected_types
+        if any(_same_exception_type(left, r) for r in observed_types)
+    ]
+    unmatched = [
+        left
+        for left in expected_types
+        if not any(_same_exception_type(left, r) for r in observed_types)
+    ]
+    return matched, unmatched
+
+
 def compare_signatures(expected: FailureSignature, observed: FailureSignature) -> SignatureMatch:
     """Compare expected against observed, component by component."""
     match = SignatureMatch()
@@ -773,13 +902,28 @@ def compare_signatures(expected: FailureSignature, observed: FailureSignature) -
         match.notes.append("no exception line was recognized in the run output")
     elif _same_exception_type(expected.exception_type, observed.exception_type):
         match.exception = "match"
+        matched, unmatched = _compare_exception_sets(expected, observed)
+        match.matched_exceptions = matched
+        match.unmatched_exceptions = unmatched
+        if unmatched:
+            # Some but not all, which is the same answer the tests component
+            # gives one layer up, for the same reason: an issue reporting two
+            # distinct exception types, against a run that raised only one of
+            # them, has not been fully reproduced. Comparing only the primary
+            # type could not see this, and the tests component catches it only
+            # when the tests differ too, which they need not.
+            match.exception = "partial"
+            match.notes.append(
+                f"the issue reports {len(matched) + len(unmatched)} exception type(s) and the "
+                f"run raised {len(matched)}; {', '.join(unmatched[:3])} did not appear"
+            )
     else:
         match.exception = "mismatch"
         match.notes.append(
             f"the issue reports {expected.exception_type}, the run raised {observed.exception_type}"
         )
 
-    if match.exception == "match":
+    if match.exception in ("match", "partial"):
         match.message = compare_messages(
             expected.exception_message,
             observed.exception_message,

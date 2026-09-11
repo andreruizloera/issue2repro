@@ -210,9 +210,10 @@ match is `partial`, never `reproduced`. Messages compare as `exact`,
 `different`; a different message under a matching type is enough to make
 a verdict `partial`.
 
-The tests component has a fourth value, `partial`, for an issue that
-reports several failing tests against a run that reproduced only some of
-them:
+Two components have a fourth value, `partial`, for the case where some of
+what the issue reported reproduced and some did not. The tests component
+takes it when an issue reports several failing tests against a run that
+reproduced only some of them:
 
 ```
 Verification: PARTIAL (observed by running reproduce.sh on this machine)
@@ -232,6 +233,39 @@ so counting any overlap at all as a match made a run that reproduced one
 of four reported failures produce the same output, and the same exit 0,
 as one that reproduced all four. A partial component alone is enough to
 downgrade the verdict, without any mismatch anywhere.
+
+The exception component has the same fourth value, for the same reason one
+layer down. A build usually raises more than one exception type, so both
+signatures carry every type they showed, and a reported type that appears
+nowhere in the run is named. Here an issue reports a `ValueError` and a
+`KeyError`, and the run fails both of the reported tests with the
+`KeyError`, so the `ValueError` never happened:
+
+```
+Verification: PARTIAL (observed by running reproduce.sh on this machine)
+  the run failed, and only part of the reported signature matched
+  expected (from the issue): KeyError: 'span'; test_widen, test_narrow
+  observed (from the run):   KeyError: 'span'...; tests/test_widen.py::test_widen, tests/test_narrow.py::test_narrow
+  exception: partial (1 of 2: KeyError)
+  message:   exact
+  tests:     match (test_widen, test_narrow)
+  note: the issue reports 2 exception type(s) and the run raised 1; ValueError did not appear
+```
+
+The tests component cannot catch this one: every test the issue named did
+fail, so it reads `match`, and before the exception set was compared this
+was `REPRODUCED` with nothing anywhere in the output objecting.
+
+Two rules keep that check from overreaching, and both are tested:
+
+- **The set can only narrow a match, never widen a mismatch.** It is
+  consulted only once the two primary types already agree. A build log
+  carries exception lines that are not the failure, a logged traceback from
+  a passing test among them, and letting the wider set decide a *match*
+  would manufacture reproductions.
+- **An exception the run raised and the issue never reported is not
+  counted against it**, exactly as an extra failing test is not. Only the
+  reported types are partitioned into matched and unmatched.
 
 #### Which frame, and which part of it
 
@@ -571,7 +605,7 @@ inside the reproduction step instead. Run with an empty local repository and
 tell" answer rather than the "no" answer, and never a false `REPRODUCED`,
 but it is a less precise label than the Python path gives.
 
-Three ordering rules matter more than the comparison itself:
+Four ordering rules matter more than the comparison itself:
 
 - A failure during a **setup** step is decided before any signature is
   compared. The reproduction never ran, so nothing in the output is
@@ -582,6 +616,14 @@ Three ordering rules matter more than the comparison itself:
   that happens to agree there is not evidence and must not soften a clear
   `different-failure` into a `partial`. Frames refine a matching
   exception; they never rescue a mismatched one.
+- **The run side picks which of its exceptions to compare in detail by
+  what the issue named**, not by position. The issue side keeps the last
+  recognized traceback and pytest's short summary kept its first line, so
+  two sides reading the same two-exception failure used to land on
+  different halves of it and report `different-failure` on a clean
+  reproduction. The preference invents nothing: it chooses only among
+  exceptions the run really printed, and when the run raised none of the
+  reported type the positional rule stands and the mismatch is real.
 - **The inferred confidence score is not overwritten** by a verdict. The
   percentage measures how much checkable signal the issue carried; the
   verdict measures what happened when the reproduction ran. "45%
